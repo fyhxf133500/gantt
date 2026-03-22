@@ -6,7 +6,7 @@ import { useTasks } from "../hooks/useTasks";
 import type { Task } from "../types/task";
 
 export function Home() {
-  const { tasks, addTask, updateTask, deleteTask } = useTasks();
+  const { tasks, visibleTasks, addTask, updateTask, deleteTask, toggleTaskExpanded } = useTasks();
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingTask, setEditingTask] = useState<Task | null>(null);
 
@@ -44,15 +44,18 @@ export function Home() {
     <div className="page">
       <h1 className="page-title">项目甘特图</h1>
       <GanttChart
-        tasks={tasks}
+        tasks={visibleTasks}
         onCreateTask={handleCreateTask}
         onEditTask={handleEditTask}
         onDeleteTask={handleDeleteTask}
+        onUpdateTask={updateTask}
+        onToggleExpand={toggleTaskExpanded}
       />
       <TaskFormModal
         isOpen={isModalOpen}
         mode={editingTask ? "edit" : "create"}
         initialTask={editingTask}
+        tasks={tasks}
         onClose={handleCloseModal}
         onSubmit={handleSubmit}
       />

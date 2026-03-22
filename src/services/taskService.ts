@@ -1,6 +1,9 @@
 ﻿import type { Task } from "../types/task";
 
 const STORAGE_KEY = "gantt_tasks";
+const STORAGE_VERSION_KEY = "gantt_tasks_version";
+const CURRENT_STORAGE_VERSION = "3";
+const RESET_ONCE_KEY = "gantt_tasks_reset_v3";
 
 type StoredTask = Omit<Task, "start" | "end"> & {
   start: string;
@@ -9,6 +12,25 @@ type StoredTask = Omit<Task, "start" | "end"> & {
 
 function isStorageAvailable() {
   return typeof window !== "undefined" && !!window.localStorage;
+}
+
+function ensureStorageVersion() {
+  if (!isStorageAvailable()) return false;
+
+  const resetDone = window.localStorage.getItem(RESET_ONCE_KEY);
+  if (!resetDone) {
+    window.localStorage.removeItem(STORAGE_KEY);
+    window.localStorage.setItem(RESET_ONCE_KEY, "1");
+    window.localStorage.setItem(STORAGE_VERSION_KEY, CURRENT_STORAGE_VERSION);
+    return false;
+  }
+
+  const version = window.localStorage.getItem(STORAGE_VERSION_KEY);
+  if (version === CURRENT_STORAGE_VERSION) return true;
+
+  window.localStorage.removeItem(STORAGE_KEY);
+  window.localStorage.setItem(STORAGE_VERSION_KEY, CURRENT_STORAGE_VERSION);
+  return false;
 }
 
 function formatDate(date: Date) {
@@ -31,6 +53,10 @@ function toStoredTask(task: Task): StoredTask {
     progress: task.progress,
     start: formatDate(task.start),
     end: formatDate(task.end),
+    parentId: task.parentId ?? null,
+    dependencies: task.dependencies ?? [],
+    type: task.type ?? "task",
+    isExpanded: task.isExpanded ?? true,
   };
 }
 
@@ -42,17 +68,30 @@ function fromStoredTask(task: StoredTask): Task | null {
   const parsedEnd = parseDate(task.end);
   if (!parsedStart || !parsedEnd) return null;
   const progress = Number.isFinite(task.progress) ? Number(task.progress) : 0;
+  const dependencies = Array.isArray(task.dependencies)
+    ? task.dependencies.filter((dep): dep is string => typeof dep === "string")
+    : [];
+  const parentId = typeof task.parentId === "string" ? task.parentId : null;
+  const type: Task["type"] = task.type === "milestone" ? "milestone" : "task";
+  const isExpanded = typeof task.isExpanded === "boolean" ? task.isExpanded : true;
+
   return {
     id: task.id,
     name: task.name,
     start: parsedStart,
     end: parsedEnd,
     progress: Math.max(0, Math.min(100, progress)),
+    parentId,
+    dependencies,
+    type,
+    isExpanded,
   };
 }
 
 export function loadTasks(): Task[] | null {
   if (!isStorageAvailable()) return null;
+  if (!ensureStorageVersion()) return null;
+
   const raw = window.localStorage.getItem(STORAGE_KEY);
   if (!raw) return null;
 
@@ -71,6 +110,7 @@ export function loadTasks(): Task[] | null {
 export function saveTasks(tasks: Task[]) {
   if (!isStorageAvailable()) return;
   const payload = tasks.map((task) => toStoredTask(task));
+  window.localStorage.setItem(STORAGE_VERSION_KEY, CURRENT_STORAGE_VERSION);
   window.localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
 }
 

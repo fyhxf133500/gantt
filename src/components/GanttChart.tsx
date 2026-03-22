@@ -6,10 +6,19 @@ import type { Task } from "../types/task";
 import { GanttToolbar } from "./GanttToolbar";
 
 export type GanttChartProps = {
-  tasks: Task[];
+  tasks: TaskRow[];
   onCreateTask: () => void;
   onEditTask: (task: Task) => void;
   onDeleteTask: (task: Task) => void;
+  onUpdateTask: (id: string, input: TaskUpdateInput) => void;
+  onToggleExpand: (id: string) => void;
+};
+
+type TaskUpdateInput = Pick<Task, "name" | "start" | "end" | "progress">;
+
+type TaskRow = Task & {
+  level: number;
+  hasChildren: boolean;
 };
 
 type TaskListHeaderProps = {
@@ -32,9 +41,16 @@ type TaskListTableBaseProps = {
 };
 
 type TaskListTableContentProps = TaskListTableBaseProps & {
-  taskById: Map<string, Task>;
+  taskById: Map<string, TaskRow>;
   onEditTask: (task: Task) => void;
   onDeleteTask: (task: Task) => void;
+  onToggleExpand: (id: string) => void;
+};
+
+type TooltipContentProps = {
+  task: GanttTask;
+  fontSize: string;
+  fontFamily: string;
 };
 
 const HEADER_HEIGHT = 50;
@@ -45,6 +61,18 @@ const DATE_FORMAT_OPTIONS: Intl.DateTimeFormatOptions = {
   month: "2-digit",
   day: "2-digit",
 };
+
+function formatDateYMD(date: Date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function getDurationDays(start: Date, end: Date) {
+  const diff = Math.floor((utcDayStamp(end) - utcDayStamp(start)) / MS_PER_DAY);
+  return Math.max(0, diff + 1);
+}
 
 function TaskListHeader({ headerHeight, rowWidth, fontFamily, fontSize }: TaskListHeaderProps) {
   const cellStyle: CSSProperties = {
@@ -92,29 +120,31 @@ function TaskListTableContent({
   tasks,
   selectedTaskId,
   setSelectedTask,
-  onExpanderClick,
+  onExpanderClick: _onExpanderClick,
   taskById,
   onEditTask,
   onDeleteTask,
+  onToggleExpand,
 }: TaskListTableContentProps) {
   const dateFormatter = useMemo(() => new Intl.DateTimeFormat(locale, DATE_FORMAT_OPTIONS), [locale]);
 
   return (
     <div className="task-list-table" style={{ fontFamily, fontSize }}>
       {tasks.map((task) => {
-        let expanderSymbol = "";
-        if (task.hideChildren === false) {
-          expanderSymbol = "▼";
-        } else if (task.hideChildren === true) {
-          expanderSymbol = "▶";
-        }
-
         const originalTask = taskById.get(task.id);
+        const level = originalTask?.level ?? 0;
+        const hasChildren = originalTask?.hasChildren ?? false;
+        const isExpanded = originalTask?.isExpanded !== false;
+        const expanderSymbol = hasChildren ? (isExpanded ? "▼" : "▶") : "";
+
         const isSelected = selectedTaskId === task.id;
         const rowClassName = isSelected ? "task-list-row task-list-row--active" : "task-list-row";
         const cellStyle: CSSProperties = {
           minWidth: rowWidth,
           maxWidth: rowWidth,
+        };
+        const nameIndentStyle: CSSProperties = {
+          paddingLeft: `${level * 16}px`,
         };
 
         return (
@@ -125,14 +155,14 @@ function TaskListTableContent({
             onClick={() => setSelectedTask(task.id)}
           >
             <div className="task-list-cell" style={cellStyle} title={task.name}>
-              <div className="task-list-name-wrapper">
+              <div className="task-list-name-wrapper" style={nameIndentStyle}>
                 <button
                   type="button"
                   className={expanderSymbol ? "task-list-expander" : "task-list-expander task-list-expander--empty"}
                   onClick={(event) => {
                     event.stopPropagation();
-                    if (expanderSymbol) {
-                      onExpanderClick(task);
+                    if (hasChildren && originalTask) {
+                      onToggleExpand(originalTask.id);
                     }
                   }}
                   aria-label={expanderSymbol ? "切换子任务" : undefined}
@@ -182,6 +212,48 @@ function TaskListTableContent({
           </div>
         );
       })}
+    </div>
+  );
+}
+
+function TooltipContent({ task, fontSize, fontFamily }: TooltipContentProps) {
+  const rowStyle: CSSProperties = {
+    display: "flex",
+    justifyContent: "space-between",
+    gap: 12,
+    fontSize,
+    color: "#0f172a",
+  };
+  const durationDays = getDurationDays(task.start, task.end);
+  const containerStyle: CSSProperties = {
+    fontFamily,
+    padding: "12px 14px",
+    minWidth: 180,
+    background: "#ffffff",
+    border: "1px solid #e2e8f0",
+    borderRadius: 10,
+    boxShadow: "0 12px 30px rgba(15, 23, 42, 0.18)",
+  };
+
+  return (
+    <div style={containerStyle}>
+      <div style={{ fontWeight: 600, marginBottom: 8 }}>{task.name}</div>
+      <div style={rowStyle}>
+        <span>开始时间</span>
+        <span>{formatDateYMD(task.start)}</span>
+      </div>
+      <div style={rowStyle}>
+        <span>结束时间</span>
+        <span>{formatDateYMD(task.end)}</span>
+      </div>
+      <div style={rowStyle}>
+        <span>工期</span>
+        <span>{durationDays} 天</span>
+      </div>
+      <div style={rowStyle}>
+        <span>进度</span>
+        <span>{Math.round(task.progress)}%</span>
+      </div>
     </div>
   );
 }
@@ -244,7 +316,14 @@ function getViewDate(earliestStart: Date | null, mode: ViewMode) {
   return new Date(earliestStart.getTime() + offset);
 }
 
-export function GanttChart({ tasks, onCreateTask, onEditTask, onDeleteTask }: GanttChartProps) {
+export function GanttChart({
+  tasks,
+  onCreateTask,
+  onEditTask,
+  onDeleteTask,
+  onUpdateTask,
+  onToggleExpand,
+}: GanttChartProps) {
   const [viewMode, setViewMode] = useState<ViewMode>(ViewMode.Day);
   const ganttContainerRef = useRef<HTMLDivElement | null>(null);
   const horizontalScrollRef = useRef<HTMLDivElement | null>(null);
@@ -256,7 +335,7 @@ export function GanttChart({ tasks, onCreateTask, onEditTask, onDeleteTask }: Ga
       start: task.start,
       end: task.end,
       progress: task.progress,
-      type: "task",
+      type: task.type ?? "task",
     }));
   }, [tasks]);
 
@@ -277,10 +356,23 @@ export function GanttChart({ tasks, onCreateTask, onEditTask, onDeleteTask }: Ga
         taskById={taskById}
         onEditTask={onEditTask}
         onDeleteTask={onDeleteTask}
+        onToggleExpand={onToggleExpand}
       />
     );
     return Table;
-  }, [taskById, onEditTask, onDeleteTask]);
+  }, [taskById, onEditTask, onDeleteTask, onToggleExpand]);
+
+  const handleDateChange = (updatedTask: GanttTask) => {
+    const originalTask = taskById.get(updatedTask.id);
+    if (!originalTask) return;
+
+    onUpdateTask(originalTask.id, {
+      name: originalTask.name,
+      start: updatedTask.start,
+      end: updatedTask.end,
+      progress: originalTask.progress,
+    });
+  };
 
   const resolveHorizontalScroll = () => {
     if (horizontalScrollRef.current && horizontalScrollRef.current.isConnected) {
@@ -362,6 +454,8 @@ export function GanttChart({ tasks, onCreateTask, onEditTask, onDeleteTask }: Ga
             preStepsCount={viewConfig.preStepsCount}
             TaskListHeader={TaskListHeader}
             TaskListTable={TaskListTable}
+            TooltipContent={TooltipContent}
+            onDateChange={handleDateChange}
           />
         </div>
       )}

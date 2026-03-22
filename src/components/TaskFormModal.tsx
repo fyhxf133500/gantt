@@ -6,12 +6,15 @@ export type TaskFormData = {
   start: Date;
   end: Date;
   progress: number;
+  parentId: string | null;
+  type: NonNullable<Task["type"]>;
 };
 
 type TaskFormModalProps = {
   isOpen: boolean;
   mode: "create" | "edit";
   initialTask?: Task | null;
+  tasks: Task[];
   onClose: () => void;
   onSubmit: (data: TaskFormData) => void;
 };
@@ -38,11 +41,39 @@ function getDefaultDates() {
   return { start, end };
 }
 
-export function TaskFormModal({ isOpen, mode, initialTask, onClose, onSubmit }: TaskFormModalProps) {
+function buildChildrenMap(tasks: Task[]) {
+  const map = new Map<string, string[]>();
+  tasks.forEach((task) => {
+    if (!task.parentId) return;
+    const list = map.get(task.parentId) ?? [];
+    list.push(task.id);
+    map.set(task.parentId, list);
+  });
+  return map;
+}
+
+function collectDescendants(childrenMap: Map<string, string[]>, rootId: string) {
+  const result = new Set<string>();
+  const stack = [...(childrenMap.get(rootId) ?? [])];
+
+  while (stack.length > 0) {
+    const current = stack.pop();
+    if (!current || result.has(current)) continue;
+    result.add(current);
+    const children = childrenMap.get(current) ?? [];
+    stack.push(...children);
+  }
+
+  return result;
+}
+
+export function TaskFormModal({ isOpen, mode, initialTask, tasks, onClose, onSubmit }: TaskFormModalProps) {
   const [name, setName] = useState("");
   const [start, setStart] = useState("");
   const [end, setEnd] = useState("");
   const [progress, setProgress] = useState(0);
+  const [parentId, setParentId] = useState("");
+  const [taskType, setTaskType] = useState<NonNullable<Task["type"]>>("task");
 
   useEffect(() => {
     if (!isOpen) return;
@@ -52,6 +83,8 @@ export function TaskFormModal({ isOpen, mode, initialTask, onClose, onSubmit }: 
       setStart(toInputDate(initialTask.start));
       setEnd(toInputDate(initialTask.end));
       setProgress(initialTask.progress);
+      setParentId(initialTask.parentId ?? "");
+      setTaskType(initialTask.type ?? "task");
       return;
     }
 
@@ -60,7 +93,21 @@ export function TaskFormModal({ isOpen, mode, initialTask, onClose, onSubmit }: 
     setStart(toInputDate(defaults.start));
     setEnd(toInputDate(defaults.end));
     setProgress(0);
+    setParentId("");
+    setTaskType("task");
   }, [isOpen, initialTask]);
+
+  const disallowedParentIds = useMemo(() => {
+    if (!initialTask) return new Set<string>();
+    const childrenMap = buildChildrenMap(tasks);
+    const descendants = collectDescendants(childrenMap, initialTask.id);
+    return new Set([initialTask.id, ...descendants]);
+  }, [tasks, initialTask]);
+
+  const parentOptions = useMemo(
+    () => tasks.filter((task) => !disallowedParentIds.has(task.id)),
+    [tasks, disallowedParentIds]
+  );
 
   const parsedStart = useMemo(() => parseInputDate(start), [start]);
   const parsedEnd = useMemo(() => parseInputDate(end), [end]);
@@ -98,6 +145,8 @@ export function TaskFormModal({ isOpen, mode, initialTask, onClose, onSubmit }: 
               start: parsedStart,
               end: parsedEnd,
               progress,
+              parentId: parentId ? parentId : null,
+              type: taskType,
             });
           }}
         >
@@ -145,6 +194,34 @@ export function TaskFormModal({ isOpen, mode, initialTask, onClose, onSubmit }: 
               onChange={(event) => setProgress(Number(event.target.value))}
             />
           </label>
+          <div className="task-form-row">
+            <label className="task-form-field">
+              <span>父任务</span>
+              <select
+                className="task-form-input"
+                value={parentId}
+                onChange={(event) => setParentId(event.target.value)}
+              >
+                <option value="">无</option>
+                {parentOptions.map((task) => (
+                  <option key={task.id} value={task.id}>
+                    {task.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="task-form-field">
+              <span>任务类型</span>
+              <select
+                className="task-form-input"
+                value={taskType}
+                onChange={(event) => setTaskType(event.target.value as NonNullable<Task["type"]>)}
+              >
+                <option value="task">普通任务</option>
+                <option value="milestone">里程碑</option>
+              </select>
+            </label>
+          </div>
           {isDateRangeInvalid && <p className="task-form-error">结束时间不能早于开始时间。</p>}
           <div className="task-form-footer">
             <button type="button" className="secondary-button" onClick={onClose}>

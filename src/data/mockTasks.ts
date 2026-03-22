@@ -1,12 +1,25 @@
-import type { Task } from "../types/task";
+﻿import type { Task } from "../types/task";
 
 export const mockTasks: Task[] = [
+  {
+    id: "p1",
+    name: "项目实施",
+    start: new Date(2026, 2, 10),
+    end: new Date(2026, 2, 25),
+    progress: 40,
+    parentId: null,
+    dependencies: [],
+    type: "task",
+  },
   {
     id: "t1",
     name: "需求分析",
     start: new Date(2026, 2, 10),
     end: new Date(2026, 2, 12),
     progress: 100,
+    parentId: "p1",
+    dependencies: [],
+    type: "task",
   },
   {
     id: "t2",
@@ -14,6 +27,9 @@ export const mockTasks: Task[] = [
     start: new Date(2026, 2, 13),
     end: new Date(2026, 2, 15),
     progress: 60,
+    parentId: "p1",
+    dependencies: ["t1"],
+    type: "task",
   },
   {
     id: "t3",
@@ -21,5 +37,18 @@ export const mockTasks: Task[] = [
     start: new Date(2026, 2, 16),
     end: new Date(2026, 2, 24),
     progress: 30,
+    parentId: "p1",
+    dependencies: ["t2"],
+    type: "task",
+  },
+  {
+    id: "m1",
+    name: "上线",
+    start: new Date(2026, 2, 25),
+    end: new Date(2026, 2, 25),
+    progress: 0,
+    parentId: "p1",
+    dependencies: ["t3"],
+    type: "milestone",
   },
 ];
