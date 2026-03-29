@@ -1,4 +1,4 @@
-﻿import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { Task } from "../types/task";
 
 export type TaskFormData = {
@@ -109,6 +109,11 @@ export function TaskFormModal({ isOpen, mode, initialTask, tasks, onClose, onSub
     [tasks, disallowedParentIds]
   );
 
+  const isParentWithChildren = useMemo(() => {
+    if (!initialTask) return false;
+    return tasks.some((task) => task.parentId === initialTask.id);
+  }, [tasks, initialTask]);
+
   const parsedStart = useMemo(() => parseInputDate(start), [start]);
   const parsedEnd = useMemo(() => parseInputDate(end), [end]);
   const trimmedName = name.trim();
@@ -119,6 +124,7 @@ export function TaskFormModal({ isOpen, mode, initialTask, tasks, onClose, onSub
 
   const title = mode === "edit" ? "编辑任务" : "新建任务";
   const submitLabel = mode === "edit" ? "保存修改" : "创建任务";
+  const progressDisplay = Number.isFinite(progress) ? `${progress.toFixed(1)}%` : "0%";
 
   return (
     <div className="task-form-overlay" onClick={onClose}>
@@ -169,6 +175,7 @@ export function TaskFormModal({ isOpen, mode, initialTask, tasks, onClose, onSub
                 value={start}
                 onChange={(event) => setStart(event.target.value)}
                 required
+                disabled={isParentWithChildren}
               />
             </label>
             <label className="task-form-field">
@@ -179,20 +186,28 @@ export function TaskFormModal({ isOpen, mode, initialTask, tasks, onClose, onSub
                 value={end}
                 onChange={(event) => setEnd(event.target.value)}
                 required
+                disabled={isParentWithChildren}
               />
             </label>
           </div>
           <label className="task-form-field">
             <span>当前进度 (%)</span>
-            <input
-              className="task-form-input"
-              type="number"
-              min={0}
-              max={100}
-              step={1}
-              value={progress}
-              onChange={(event) => setProgress(Number(event.target.value))}
-            />
+            {isParentWithChildren ? (
+              <div className="task-form-static">
+                <span>{progressDisplay}</span>
+                <span className="task-form-hint">由子任务自动计算</span>
+              </div>
+            ) : (
+              <input
+                className="task-form-input"
+                type="number"
+                min={0}
+                max={100}
+                step={1}
+                value={progress}
+                onChange={(event) => setProgress(Number(event.target.value))}
+              />
+            )}
           </label>
           <div className="task-form-row">
             <label className="task-form-field">
@@ -222,6 +237,9 @@ export function TaskFormModal({ isOpen, mode, initialTask, tasks, onClose, onSub
               </select>
             </label>
           </div>
+          {isParentWithChildren && (
+            <p className="task-form-hint">父任务的起止时间由子任务自动汇总。</p>
+          )}
           {isDateRangeInvalid && <p className="task-form-error">结束时间不能早于开始时间。</p>}
           <div className="task-form-footer">
             <button type="button" className="secondary-button" onClick={onClose}>

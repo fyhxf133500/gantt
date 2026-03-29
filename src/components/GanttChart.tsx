@@ -1,4 +1,4 @@
-﻿import { useMemo, useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import type { CSSProperties, WheelEvent, FC } from "react";
 import { Gantt, Task as GanttTask, ViewMode } from "gantt-task-react";
 import "gantt-task-react/dist/index.css";
@@ -12,6 +12,7 @@ export type GanttChartProps = {
   onDeleteTask: (task: Task) => void;
   onUpdateTask: (id: string, input: TaskUpdateInput) => void;
   onToggleExpand: (id: string) => void;
+  onMoveTask: (id: string, parentId: string | null, options?: MoveTaskOptions) => void;
 };
 
 type TaskUpdateInput = Pick<Task, "name" | "start" | "end" | "progress">;
@@ -19,6 +20,11 @@ type TaskUpdateInput = Pick<Task, "name" | "start" | "end" | "progress">;
 type TaskRow = Task & {
   level: number;
   hasChildren: boolean;
+};
+
+type MoveTaskOptions = {
+  referenceId?: string | null;
+  placement?: "before" | "after";
 };
 
 type TaskListHeaderProps = {
@@ -45,6 +51,7 @@ type TaskListTableContentProps = TaskListTableBaseProps & {
   onEditTask: (task: Task) => void;
   onDeleteTask: (task: Task) => void;
   onToggleExpand: (id: string) => void;
+  onMoveTask: (id: string, parentId: string | null, options?: MoveTaskOptions) => void;
 };
 
 type TooltipContentProps = {
@@ -125,11 +132,47 @@ function TaskListTableContent({
   onEditTask,
   onDeleteTask,
   onToggleExpand,
+  onMoveTask,
 }: TaskListTableContentProps) {
   const dateFormatter = useMemo(() => new Intl.DateTimeFormat(locale, DATE_FORMAT_OPTIONS), [locale]);
+  const [draggingTaskId, setDraggingTaskId] = useState<string | null>(null);
+  const [dropTargetId, setDropTargetId] = useState<string | null>(null);
+  const [dropPosition, setDropPosition] = useState<"before" | "after" | "inside" | null>(null);
+
+  const isInvalidDropTarget = (dragId: string, targetId: string) => {
+    if (dragId === targetId) return true;
+    let current = taskById.get(targetId);
+    while (current?.parentId) {
+      if (current.parentId === dragId) return true;
+      current = taskById.get(current.parentId);
+    }
+    return false;
+  };
 
   return (
-    <div className="task-list-table" style={{ fontFamily, fontSize }}>
+    <div
+      className={draggingTaskId ? "task-list-table task-list-table--dragging" : "task-list-table"}
+      style={{ fontFamily, fontSize }}
+      onDragOver={(event) => {
+        if (!draggingTaskId) return;
+        event.preventDefault();
+        event.dataTransfer.dropEffect = "move";
+        if (dropTargetId) {
+          setDropTargetId(null);
+          setDropPosition(null);
+        }
+      }}
+      onDrop={(event) => {
+        if (!draggingTaskId) return;
+        event.preventDefault();
+        const dragId = event.dataTransfer.getData("text/plain") || draggingTaskId;
+        if (!dragId) return;
+        onMoveTask(dragId, null);
+        setDraggingTaskId(null);
+        setDropTargetId(null);
+        setDropPosition(null);
+      }}
+    >
       {tasks.map((task) => {
         const originalTask = taskById.get(task.id);
         const level = originalTask?.level ?? 0;
@@ -138,7 +181,21 @@ function TaskListTableContent({
         const expanderSymbol = hasChildren ? (isExpanded ? "▼" : "▶") : "";
 
         const isSelected = selectedTaskId === task.id;
-        const rowClassName = isSelected ? "task-list-row task-list-row--active" : "task-list-row";
+        const isDropTarget = Boolean(draggingTaskId && dropTargetId === task.id);
+        const isDropInside = isDropTarget && dropPosition === "inside";
+        const isDropBefore = isDropTarget && dropPosition === "before";
+        const isDropAfter = isDropTarget && dropPosition === "after";
+        const isDraggingRow = draggingTaskId === task.id;
+        const rowClassName = [
+          "task-list-row",
+          isSelected ? "task-list-row--active" : "",
+          isDropInside ? "task-list-row--drag-target" : "",
+          isDropBefore ? "task-list-row--drop-before" : "",
+          isDropAfter ? "task-list-row--drop-after" : "",
+          isDraggingRow ? "task-list-row--dragging" : "",
+        ]
+          .filter(Boolean)
+          .join(" ");
         const cellStyle: CSSProperties = {
           minWidth: rowWidth,
           maxWidth: rowWidth,
@@ -153,6 +210,68 @@ function TaskListTableContent({
             className={rowClassName}
             style={{ height: rowHeight }}
             onClick={() => setSelectedTask(task.id)}
+            draggable={Boolean(originalTask) && !originalTask?.hasChildren}
+            onDragStart={(event) => {
+              if (!originalTask || originalTask.hasChildren) return;
+              event.dataTransfer.effectAllowed = "move";
+              event.dataTransfer.setData("text/plain", originalTask.id);
+              setDraggingTaskId(originalTask.id);
+              setDropTargetId(null);
+              setDropPosition(null);
+            }}
+            onDragEnd={() => {
+              setDraggingTaskId(null);
+              setDropTargetId(null);
+              setDropPosition(null);
+            }}
+            onDragOver={(event) => {
+              if (!draggingTaskId || !originalTask) return;
+              const dragId = draggingTaskId;
+              if (isInvalidDropTarget(dragId, originalTask.id)) {
+                event.dataTransfer.dropEffect = "none";
+                setDropTargetId(null);
+                setDropPosition(null);
+                return;
+              }
+              event.preventDefault();
+              event.stopPropagation();
+              const rect = event.currentTarget.getBoundingClientRect();
+              const offset = event.clientY - rect.top;
+              const ratio = rect.height > 0 ? offset / rect.height : 0.5;
+              let nextPosition: "before" | "after" | "inside" = "inside";
+              if (ratio < 0.25) {
+                nextPosition = "before";
+              } else if (ratio > 0.75) {
+                nextPosition = "after";
+              }
+              event.dataTransfer.dropEffect = "move";
+              setDropTargetId(originalTask.id);
+              setDropPosition(nextPosition);
+            }}
+            onDrop={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              if (!originalTask) return;
+              const dragId = event.dataTransfer.getData("text/plain") || draggingTaskId;
+              if (!dragId) return;
+              if (isInvalidDropTarget(dragId, originalTask.id)) {
+                setDropTargetId(null);
+                setDropPosition(null);
+                return;
+              }
+              if (dropPosition === "before" || dropPosition === "after") {
+                const targetParentId = originalTask.parentId ?? null;
+                onMoveTask(dragId, targetParentId, {
+                  referenceId: originalTask.id,
+                  placement: dropPosition,
+                });
+              } else {
+                onMoveTask(dragId, originalTask.id);
+              }
+              setDraggingTaskId(null);
+              setDropTargetId(null);
+              setDropPosition(null);
+            }}
           >
             <div className="task-list-cell" style={cellStyle} title={task.name}>
               <div className="task-list-name-wrapper" style={nameIndentStyle}>
@@ -212,6 +331,29 @@ function TaskListTableContent({
           </div>
         );
       })}
+      <div
+        className="task-list-dropzone"
+        style={{ height: Math.max(12, rowHeight / 3) }}
+        onDragOver={(event) => {
+          if (!draggingTaskId) return;
+          event.preventDefault();
+          event.dataTransfer.dropEffect = "move";
+          if (dropTargetId) {
+            setDropTargetId(null);
+            setDropPosition(null);
+          }
+        }}
+        onDrop={(event) => {
+          if (!draggingTaskId) return;
+          event.preventDefault();
+          const dragId = event.dataTransfer.getData("text/plain") || draggingTaskId;
+          if (!dragId) return;
+          onMoveTask(dragId, null);
+          setDraggingTaskId(null);
+          setDropTargetId(null);
+          setDropPosition(null);
+        }}
+      />
     </div>
   );
 }
@@ -323,20 +465,33 @@ export function GanttChart({
   onDeleteTask,
   onUpdateTask,
   onToggleExpand,
+  onMoveTask,
 }: GanttChartProps) {
   const [viewMode, setViewMode] = useState<ViewMode>(ViewMode.Day);
   const ganttContainerRef = useRef<HTMLDivElement | null>(null);
   const horizontalScrollRef = useRef<HTMLDivElement | null>(null);
 
   const ganttTasks = useMemo<GanttTask[]>(() => {
-    return tasks.map((task) => ({
-      id: task.id,
-      name: task.name,
-      start: task.start,
-      end: task.end,
-      progress: task.progress,
-      type: task.type ?? "task",
-    }));
+    return tasks.map((task) => {
+      const isSummary = task.hasChildren;
+      return {
+        id: task.id,
+        name: task.name,
+        start: task.start,
+        end: task.end,
+        progress: task.progress,
+        type: isSummary ? "project" : task.type ?? "task",
+        isDisabled: isSummary,
+        styles: isSummary
+          ? {
+              backgroundColor: "#d1fae5",
+              backgroundSelectedColor: "#a7f3d0",
+              progressColor: "#34d399",
+              progressSelectedColor: "#10b981",
+            }
+          : undefined,
+      };
+    });
   }, [tasks]);
 
   const taskById = useMemo(() => new Map(tasks.map((task) => [task.id, task])), [tasks]);
@@ -357,14 +512,16 @@ export function GanttChart({
         onEditTask={onEditTask}
         onDeleteTask={onDeleteTask}
         onToggleExpand={onToggleExpand}
+        onMoveTask={onMoveTask}
       />
     );
     return Table;
-  }, [taskById, onEditTask, onDeleteTask, onToggleExpand]);
+  }, [taskById, onEditTask, onDeleteTask, onToggleExpand, onMoveTask]);
 
   const handleDateChange = (updatedTask: GanttTask) => {
     const originalTask = taskById.get(updatedTask.id);
-    if (!originalTask) return;
+    if (!originalTask) return false;
+    if (originalTask.hasChildren) return false;
 
     onUpdateTask(originalTask.id, {
       name: originalTask.name,
@@ -372,6 +529,7 @@ export function GanttChart({
       end: updatedTask.end,
       progress: originalTask.progress,
     });
+    return true;
   };
 
   const resolveHorizontalScroll = () => {
