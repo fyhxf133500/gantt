@@ -1,8 +1,8 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, WheelEvent, FC } from "react";
 import { Gantt, Task as GanttTask, ViewMode } from "gantt-task-react";
 import "gantt-task-react/dist/index.css";
-import type { Task } from "../types/task";
+import type { Task, TaskDependency } from "../types/task";
 import { GanttToolbar } from "./GanttToolbar";
 
 export type GanttChartProps = {
@@ -10,7 +10,7 @@ export type GanttChartProps = {
   onCreateTask: () => void;
   onEditTask: (task: Task) => void;
   onDeleteTask: (task: Task) => void;
-  onUpdateTask: (id: string, input: TaskUpdateInput) => void;
+  onUpdateTask: (id: string, input: TaskUpdateInput) => boolean;
   onToggleExpand: (id: string) => void;
   onMoveTask: (id: string, parentId: string | null, options?: MoveTaskOptions) => void;
 };
@@ -60,9 +60,31 @@ type TooltipContentProps = {
   fontFamily: string;
 };
 
+type DependencyPath = {
+  key: string;
+  d: string;
+  type: TaskDependency["type"];
+};
+
+type DependencyOverlayLayout = {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+  paths: DependencyPath[];
+};
+
+type OverlayRect = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
 const HEADER_HEIGHT = 50;
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 const HEADER_COLUMNS = ["任务名称", "开始时间", "结束时间", "操作"];
+const DEPENDENCY_INDENT = 18;
 const DATE_FORMAT_OPTIONS: Intl.DateTimeFormatOptions = {
   year: "numeric",
   month: "2-digit",
@@ -79,6 +101,65 @@ function formatDateYMD(date: Date) {
 function getDurationDays(start: Date, end: Date) {
   const diff = Math.floor((utcDayStamp(end) - utcDayStamp(start)) / MS_PER_DAY);
   return Math.max(0, diff + 1);
+}
+
+function buildDependencyPath(
+  dependency: TaskDependency,
+  predecessorRect: OverlayRect,
+  currentRect: OverlayRect
+) {
+  const predecessorLeft = predecessorRect.x;
+  const predecessorRight = predecessorRect.x + predecessorRect.width;
+  const currentLeft = currentRect.x;
+  const currentRight = currentRect.x + currentRect.width;
+  const predecessorCenterY = predecessorRect.y + predecessorRect.height / 2;
+  const currentCenterY = currentRect.y + currentRect.height / 2;
+
+  if (dependency.type === "SS") {
+    const elbowX = Math.min(predecessorLeft, currentLeft) - DEPENDENCY_INDENT;
+    return `M ${predecessorLeft} ${predecessorCenterY} L ${elbowX} ${predecessorCenterY} L ${elbowX} ${currentCenterY} L ${currentLeft} ${currentCenterY}`;
+  }
+
+  if (dependency.type === "FF") {
+    const elbowX = Math.max(predecessorRight, currentRight) + DEPENDENCY_INDENT;
+    return `M ${predecessorRight} ${predecessorCenterY} L ${elbowX} ${predecessorCenterY} L ${elbowX} ${currentCenterY} L ${currentRight} ${currentCenterY}`;
+  }
+
+  const elbowX = predecessorRight + Math.max(DEPENDENCY_INDENT, (currentLeft - predecessorRight) / 2);
+  return `M ${predecessorRight} ${predecessorCenterY} L ${elbowX} ${predecessorCenterY} L ${elbowX} ${currentCenterY} L ${currentLeft} ${currentCenterY}`;
+}
+
+function getChartSvg(root: HTMLDivElement) {
+  const svgElements = Array.from(root.querySelectorAll<SVGSVGElement>("svg"));
+  const candidates = svgElements.filter((svg) => !svg.classList.contains("dependency-overlay-svg"));
+  if (candidates.length === 0) return null;
+
+  return candidates.reduce<SVGSVGElement | null>((largest, svg) => {
+    if (!largest) return svg;
+    return svg.getBoundingClientRect().height > largest.getBoundingClientRect().height ? svg : largest;
+  }, null);
+}
+
+function getChartViewport(chartSvg: SVGSVGElement, root: HTMLDivElement) {
+  const svgRect = chartSvg.getBoundingClientRect();
+  let element = chartSvg.parentElement;
+  let fallback = element;
+
+  while (element && element !== root) {
+    const rect = element.getBoundingClientRect();
+    const style = window.getComputedStyle(element);
+    const clipsHorizontally = style.overflowX !== "visible" || style.overflow !== "visible";
+    const isVisibleViewport = rect.width < svgRect.width - 1;
+
+    if (clipsHorizontally && isVisibleViewport) {
+      return element;
+    }
+
+    fallback = element;
+    element = element.parentElement;
+  }
+
+  return fallback;
 }
 
 function TaskListHeader({ headerHeight, rowWidth, fontFamily, fontSize }: TaskListHeaderProps) {
@@ -468,6 +549,7 @@ export function GanttChart({
   onMoveTask,
 }: GanttChartProps) {
   const [viewMode, setViewMode] = useState<ViewMode>(ViewMode.Day);
+  const [dependencyOverlay, setDependencyOverlay] = useState<DependencyOverlayLayout | null>(null);
   const ganttContainerRef = useRef<HTMLDivElement | null>(null);
   const horizontalScrollRef = useRef<HTMLDivElement | null>(null);
 
@@ -496,6 +578,110 @@ export function GanttChart({
 
   const taskById = useMemo(() => new Map(tasks.map((task) => [task.id, task])), [tasks]);
 
+  useEffect(() => {
+    const root = ganttContainerRef.current;
+    if (!root) return undefined;
+
+    let frameId = 0;
+
+    const updateOverlay = () => {
+      const chartSvg = getChartSvg(root);
+      if (!chartSvg) {
+        setDependencyOverlay(null);
+        return;
+      }
+
+      const chartViewport = getChartViewport(chartSvg, root);
+      if (!chartViewport) {
+        setDependencyOverlay(null);
+        return;
+      }
+
+      const wrapperRect = root.getBoundingClientRect();
+      const viewportRect = chartViewport.getBoundingClientRect();
+      const barElements = Array.from(chartSvg.querySelectorAll<SVGGElement>("g[tabindex='0']"));
+      const barRectById = new Map<string, OverlayRect>();
+
+      tasks.forEach((task, index) => {
+        const element = barElements[index];
+        if (!element) return;
+        const rect = element.getBoundingClientRect();
+        barRectById.set(task.id, {
+          x: rect.left - viewportRect.left,
+          y: rect.top - viewportRect.top,
+          width: rect.width,
+          height: rect.height,
+        });
+      });
+
+      const paths: DependencyPath[] = [];
+      tasks.forEach((task) => {
+        (task.dependencies ?? []).forEach((dependency, dependencyIndex) => {
+          const predecessorRect = barRectById.get(dependency.taskId);
+          const currentRect = barRectById.get(task.id);
+          if (!predecessorRect || !currentRect) return;
+
+          paths.push({
+            key: `${task.id}-${dependency.taskId}-${dependency.type}-${dependencyIndex}`,
+            d: buildDependencyPath(dependency, predecessorRect, currentRect),
+            type: dependency.type,
+          });
+        });
+      });
+
+      if (paths.length === 0) {
+        setDependencyOverlay(null);
+        return;
+      }
+
+      setDependencyOverlay({
+        left: viewportRect.left - wrapperRect.left,
+        top: viewportRect.top - wrapperRect.top,
+        width: viewportRect.width,
+        height: viewportRect.height,
+        paths,
+      });
+    };
+
+    const scheduleOverlayUpdate = () => {
+      cancelAnimationFrame(frameId);
+      frameId = requestAnimationFrame(updateOverlay);
+    };
+
+    scheduleOverlayUpdate();
+
+    const resizeObserver = new ResizeObserver(() => {
+      scheduleOverlayUpdate();
+    });
+    resizeObserver.observe(root);
+
+    const mutationObserver = new MutationObserver((mutations) => {
+      const hasExternalMutation = mutations.some((mutation) => {
+        if (!(mutation.target instanceof Element)) return true;
+        return !mutation.target.closest(".dependency-overlay-host");
+      });
+      if (hasExternalMutation) {
+        scheduleOverlayUpdate();
+      }
+    });
+    mutationObserver.observe(root, { subtree: true, childList: true, attributes: true });
+
+    const handleScroll = () => {
+      scheduleOverlayUpdate();
+    };
+
+    root.addEventListener("scroll", handleScroll, true);
+    window.addEventListener("resize", handleScroll);
+
+    return () => {
+      cancelAnimationFrame(frameId);
+      resizeObserver.disconnect();
+      mutationObserver.disconnect();
+      root.removeEventListener("scroll", handleScroll, true);
+      window.removeEventListener("resize", handleScroll);
+    };
+  }, [tasks, viewMode]);
+
   const earliestStart = useMemo(() => {
     if (tasks.length === 0) return null;
     return tasks.reduce<Date>((earliest, task) => (task.start < earliest ? task.start : earliest), tasks[0].start);
@@ -523,13 +709,12 @@ export function GanttChart({
     if (!originalTask) return false;
     if (originalTask.hasChildren) return false;
 
-    onUpdateTask(originalTask.id, {
+    return onUpdateTask(originalTask.id, {
       name: originalTask.name,
       start: updatedTask.start,
       end: updatedTask.end,
       progress: originalTask.progress,
     });
-    return true;
   };
 
   const resolveHorizontalScroll = () => {
@@ -601,7 +786,7 @@ export function GanttChart({
           暂无任务
         </div>
       ) : (
-        <div style={{ marginTop: 12 }} onWheel={handleWheel} ref={ganttContainerRef}>
+        <div className="gantt-chart-area" style={{ marginTop: 12 }} onWheel={handleWheel} ref={ganttContainerRef}>
           <Gantt
             tasks={ganttTasks}
             viewMode={viewMode}
@@ -615,6 +800,47 @@ export function GanttChart({
             TooltipContent={TooltipContent}
             onDateChange={handleDateChange}
           />
+          {dependencyOverlay && (
+            <div
+              className="dependency-overlay-host"
+              style={{
+                left: dependencyOverlay.left,
+                top: dependencyOverlay.top,
+                width: dependencyOverlay.width,
+                height: dependencyOverlay.height,
+              }}
+            >
+              <svg
+                className="dependency-overlay-svg"
+                width={dependencyOverlay.width}
+                height={dependencyOverlay.height}
+                viewBox={`0 0 ${dependencyOverlay.width} ${dependencyOverlay.height}`}
+                aria-hidden="true"
+              >
+                <defs>
+                  <marker
+                    id="dependency-arrow-head"
+                    markerWidth="8"
+                    markerHeight="8"
+                    refX="7"
+                    refY="4"
+                    orient="auto"
+                    markerUnits="strokeWidth"
+                  >
+                    <path d="M 0 0 L 8 4 L 0 8 z" fill="#2563eb" />
+                  </marker>
+                </defs>
+                {dependencyOverlay.paths.map((path) => (
+                  <path
+                    key={path.key}
+                    d={path.d}
+                    className={`dependency-path dependency-path--${path.type.toLowerCase()}`}
+                    markerEnd="url(#dependency-arrow-head)"
+                  />
+                ))}
+              </svg>
+            </div>
+          )}
         </div>
       )}
     </div>

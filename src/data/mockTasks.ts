@@ -28,7 +28,7 @@ export const mockTasks: Task[] = [
     end: new Date(2026, 2, 15),
     progress: 60,
     parentId: "p1",
-    dependencies: ["t1"],
+    dependencies: [{ taskId: "t1", type: "FS" }],
     type: "task",
   },
   {
@@ -38,7 +38,7 @@ export const mockTasks: Task[] = [
     end: new Date(2026, 2, 24),
     progress: 30,
     parentId: "p1",
-    dependencies: ["t2"],
+    dependencies: [{ taskId: "t2", type: "FS" }],
     type: "task",
   },
   {
@@ -48,7 +48,7 @@ export const mockTasks: Task[] = [
     end: new Date(2026, 2, 25),
     progress: 0,
     parentId: "p1",
-    dependencies: ["t3"],
+    dependencies: [{ taskId: "t3", type: "FS" }],
     type: "milestone",
   },
 ];

@@ -1,4 +1,4 @@
-﻿import type { Task } from "../types/task";
+﻿import type { DependencyType, Task, TaskDependency } from "../types/task";
 
 const STORAGE_KEY = "gantt_tasks";
 const STORAGE_VERSION_KEY = "gantt_tasks_version";
@@ -8,6 +8,10 @@ const RESET_ONCE_KEY = "gantt_tasks_reset_v3";
 type StoredTask = Omit<Task, "start" | "end"> & {
   start: string;
   end: string;
+};
+
+type LegacyStoredTask = Omit<StoredTask, "dependencies"> & {
+  dependencies?: string[] | TaskDependency[];
 };
 
 function isStorageAvailable() {
@@ -60,7 +64,32 @@ function toStoredTask(task: Task): StoredTask {
   };
 }
 
-function fromStoredTask(task: StoredTask): Task | null {
+function isDependencyType(value: unknown): value is DependencyType {
+  return value === "FS" || value === "SS" || value === "FF";
+}
+
+function normalizeStoredDependencies(dependencies: LegacyStoredTask["dependencies"]): TaskDependency[] {
+  if (!Array.isArray(dependencies)) return [];
+
+  return dependencies.flatMap((dependency) => {
+    if (typeof dependency === "string") {
+      return [{ taskId: dependency, type: "FS" as const }];
+    }
+
+    if (
+      dependency &&
+      typeof dependency === "object" &&
+      typeof dependency.taskId === "string" &&
+      isDependencyType(dependency.type)
+    ) {
+      return [{ taskId: dependency.taskId, type: dependency.type }];
+    }
+
+    return [];
+  });
+}
+
+function fromStoredTask(task: LegacyStoredTask): Task | null {
   if (!task || typeof task !== "object") return null;
   if (typeof task.id !== "string" || typeof task.name !== "string") return null;
   if (typeof task.start !== "string" || typeof task.end !== "string") return null;
@@ -68,9 +97,7 @@ function fromStoredTask(task: StoredTask): Task | null {
   const parsedEnd = parseDate(task.end);
   if (!parsedStart || !parsedEnd) return null;
   const progress = Number.isFinite(task.progress) ? Number(task.progress) : 0;
-  const dependencies = Array.isArray(task.dependencies)
-    ? task.dependencies.filter((dep): dep is string => typeof dep === "string")
-    : [];
+  const dependencies = normalizeStoredDependencies(task.dependencies);
   const parentId = typeof task.parentId === "string" ? task.parentId : null;
   const type: Task["type"] = task.type === "milestone" ? "milestone" : "task";
   const isExpanded = typeof task.isExpanded === "boolean" ? task.isExpanded : true;
@@ -96,7 +123,7 @@ export function loadTasks(): Task[] | null {
   if (!raw) return null;
 
   try {
-    const parsed = JSON.parse(raw) as StoredTask[];
+    const parsed = JSON.parse(raw) as LegacyStoredTask[];
     if (!Array.isArray(parsed)) return null;
     const tasks = parsed
       .map((item) => fromStoredTask(item))

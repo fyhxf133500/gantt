@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import type { Task } from "../types/task";
+import type { Task, TaskDependency } from "../types/task";
 import { mockTasks } from "../data/mockTasks";
 import { loadTasks, saveTasks } from "../services/taskService";
 
@@ -24,8 +24,19 @@ export type DeleteTaskOptions = {
   mode?: "delete" | "promote";
 };
 
+export type DependencyConflict = {
+  taskId: string;
+  taskName: string;
+  dependencyTaskId: string;
+  dependencyTaskName: string;
+  type: TaskDependency["type"];
+  field: "start" | "end";
+  currentValue: Date;
+  requiredValue: Date;
+};
+
 const DEFAULT_PARENT_ID: string | null = null;
-const DEFAULT_DEPENDENCIES: string[] = [];
+const DEFAULT_DEPENDENCIES: TaskDependency[] = [];
 const DEFAULT_TASK_TYPE: Task["type"] = "task";
 const DEFAULT_EXPANDED = true;
 
@@ -36,11 +47,115 @@ function createTaskId() {
   return `task-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
+function normalizeDependencies(dependencies: Task["dependencies"]): TaskDependency[] {
+  if (!Array.isArray(dependencies)) return DEFAULT_DEPENDENCIES;
+
+  return dependencies.filter(
+    (dependency): dependency is TaskDependency =>
+      Boolean(dependency) &&
+      typeof dependency === "object" &&
+      typeof dependency.taskId === "string" &&
+      (dependency.type === "FS" || dependency.type === "SS" || dependency.type === "FF")
+  );
+}
+
+export function hasInvalidDependencies(tasks: Task[], taskId: string, dependencies: TaskDependency[]) {
+  const dependencyIds = new Set<string>();
+
+  for (const dependency of dependencies) {
+    if (dependency.taskId === taskId) return true;
+    if (dependencyIds.has(dependency.taskId)) return true;
+    dependencyIds.add(dependency.taskId);
+  }
+
+  const dependencyMap = new Map<string, string[]>();
+  tasks.forEach((task) => {
+    dependencyMap.set(
+      task.id,
+      normalizeDependencies(task.dependencies).map((dependency) => dependency.taskId)
+    );
+  });
+  dependencyMap.set(
+    taskId,
+    dependencies.map((dependency) => dependency.taskId)
+  );
+
+  const stack = [...(dependencyMap.get(taskId) ?? [])];
+  const visited = new Set<string>();
+
+  while (stack.length > 0) {
+    const current = stack.pop();
+    if (!current || visited.has(current)) continue;
+    if (current === taskId) return true;
+
+    visited.add(current);
+    const nextDependencies = dependencyMap.get(current) ?? [];
+    stack.push(...nextDependencies);
+  }
+
+  return false;
+}
+
+export function checkDependencyConflicts(tasks: Task[]): DependencyConflict[] {
+  const taskMap = new Map(tasks.map((task) => [task.id, task]));
+  const conflicts: DependencyConflict[] = [];
+
+  tasks.forEach((task) => {
+    normalizeDependencies(task.dependencies).forEach((dependency) => {
+      const predecessor = taskMap.get(dependency.taskId);
+      if (!predecessor) return;
+
+      if (dependency.type === "FS" && task.start.getTime() < predecessor.end.getTime()) {
+        conflicts.push({
+          taskId: task.id,
+          taskName: task.name,
+          dependencyTaskId: predecessor.id,
+          dependencyTaskName: predecessor.name,
+          type: dependency.type,
+          field: "start",
+          currentValue: task.start,
+          requiredValue: predecessor.end,
+        });
+        return;
+      }
+
+      if (dependency.type === "SS" && task.start.getTime() < predecessor.start.getTime()) {
+        conflicts.push({
+          taskId: task.id,
+          taskName: task.name,
+          dependencyTaskId: predecessor.id,
+          dependencyTaskName: predecessor.name,
+          type: dependency.type,
+          field: "start",
+          currentValue: task.start,
+          requiredValue: predecessor.start,
+        });
+        return;
+      }
+
+      if (dependency.type === "FF" && task.end.getTime() < predecessor.end.getTime()) {
+        conflicts.push({
+          taskId: task.id,
+          taskName: task.name,
+          dependencyTaskId: predecessor.id,
+          dependencyTaskName: predecessor.name,
+          type: dependency.type,
+          field: "end",
+          currentValue: task.end,
+          requiredValue: predecessor.end,
+        });
+      }
+    });
+  });
+
+  return conflicts;
+}
+
 function normalizeTask(task: Task): Task {
   return {
     ...task,
     parentId: task.parentId ?? DEFAULT_PARENT_ID,
-    dependencies: task.dependencies ?? DEFAULT_DEPENDENCIES,
+    dependencies: normalizeDependencies(task.dependencies),
     type: task.type ?? DEFAULT_TASK_TYPE,
     isExpanded: task.isExpanded ?? DEFAULT_EXPANDED,
   };
@@ -77,6 +192,142 @@ function isDescendant(tasks: Task[], taskId: string, potentialParentId: string) 
   const childrenMap = buildChildrenMap(tasks);
   const descendants = collectDescendants(childrenMap, taskId);
   return descendants.has(potentialParentId);
+}
+
+function shiftTask(task: Task, deltaMs: number): Task {
+  return {
+    ...task,
+    start: new Date(task.start.getTime() + deltaMs),
+    end: new Date(task.end.getTime() + deltaMs),
+  };
+}
+
+function shiftTaskTree(
+  taskMap: Map<string, Task>,
+  childrenMap: Map<string, string[]>,
+  taskId: string,
+  deltaMs: number,
+  visited = new Set<string>()
+) {
+  if (visited.has(taskId)) return;
+  const task = taskMap.get(taskId);
+  if (!task) return;
+
+  visited.add(taskId);
+  taskMap.set(taskId, shiftTask(task, deltaMs));
+
+  const children = childrenMap.get(taskId) ?? [];
+  children.forEach((childId) => {
+    shiftTaskTree(taskMap, childrenMap, childId, deltaMs, visited);
+  });
+}
+
+function getRequiredDependencyShift(task: Task, taskMap: Map<string, Task>) {
+  let requiredDelta = 0;
+
+  normalizeDependencies(task.dependencies).forEach((dependency) => {
+    const predecessor = taskMap.get(dependency.taskId);
+    if (!predecessor) return;
+
+    if (dependency.type === "FS") {
+      requiredDelta = Math.max(requiredDelta, predecessor.end.getTime() - task.start.getTime());
+      return;
+    }
+
+    if (dependency.type === "SS") {
+      requiredDelta = Math.max(requiredDelta, predecessor.start.getTime() - task.start.getTime());
+      return;
+    }
+
+    requiredDelta = Math.max(requiredDelta, predecessor.end.getTime() - task.end.getTime());
+  });
+
+  return Math.max(0, requiredDelta);
+}
+
+export function applyAutoScheduling(tasks: Task[]) {
+  const taskMap = new Map(tasks.map((task) => [task.id, task]));
+  const childrenMap = buildChildrenMap(tasks);
+  const incomingCount = new Map<string, number>();
+  const outgoingMap = new Map<string, string[]>();
+  const processed = new Set<string>();
+  let changed = false;
+
+  tasks.forEach((task) => {
+    incomingCount.set(task.id, 0);
+    outgoingMap.set(task.id, []);
+  });
+
+  tasks.forEach((task) => {
+    normalizeDependencies(task.dependencies).forEach((dependency) => {
+      if (!taskMap.has(dependency.taskId) || dependency.taskId === task.id) return;
+
+      incomingCount.set(task.id, (incomingCount.get(task.id) ?? 0) + 1);
+      const outgoing = outgoingMap.get(dependency.taskId) ?? [];
+      outgoing.push(task.id);
+      outgoingMap.set(dependency.taskId, outgoing);
+    });
+  });
+
+  const queue = tasks
+    .map((task) => task.id)
+    .filter((taskId) => (incomingCount.get(taskId) ?? 0) === 0);
+
+  while (queue.length > 0) {
+    const taskId = queue.shift();
+    if (!taskId || processed.has(taskId)) continue;
+
+    processed.add(taskId);
+    const currentTask = taskMap.get(taskId);
+    if (!currentTask) continue;
+
+    const requiredShift = getRequiredDependencyShift(currentTask, taskMap);
+    if (requiredShift > 0) {
+      shiftTaskTree(taskMap, childrenMap, taskId, requiredShift);
+      changed = true;
+    }
+
+    const outgoing = outgoingMap.get(taskId) ?? [];
+    outgoing.forEach((nextTaskId) => {
+      incomingCount.set(nextTaskId, (incomingCount.get(nextTaskId) ?? 0) - 1);
+      if ((incomingCount.get(nextTaskId) ?? 0) === 0) {
+        queue.push(nextTaskId);
+      }
+    });
+  }
+
+  if (!changed) return tasks;
+  return tasks.map((task) => taskMap.get(task.id) ?? task);
+}
+
+export function buildCreatedTasks(prev: Task[], input: TaskInput) {
+  const nextTask = normalizeTask({
+    ...input,
+    id: createTaskId(),
+  });
+
+  if (hasInvalidDependencies(prev, nextTask.id, nextTask.dependencies ?? [])) {
+    return null;
+  }
+
+  return [...prev, nextTask];
+}
+
+export function buildUpdatedTasks(prev: Task[], id: string, input: TaskInput) {
+  const current = prev.find((task) => task.id === id);
+  if (!current) return null;
+
+  const nextParentId = input.parentId ?? current.parentId ?? null;
+  if (nextParentId && isDescendant(prev, id, nextParentId)) {
+    return null;
+  }
+
+  const nextTask = normalizeTask({ ...current, ...input, parentId: nextParentId });
+  if (hasInvalidDependencies(prev, id, nextTask.dependencies ?? [])) {
+    return null;
+  }
+
+  return prev.map((task) => (task.id === id ? nextTask : task));
 }
 
 export function calculateParentSummary(tasks: Task[]) {
@@ -222,27 +473,11 @@ export function useTasks() {
   const visibleTasks = useMemo(() => flattenTasks(taskTree), [taskTree]);
 
   const addTask = useCallback((input: TaskInput) => {
-    setTasks((prev) => [
-      ...prev,
-      normalizeTask({
-        ...input,
-        id: createTaskId(),
-      }),
-    ]);
+    setTasks((prev) => buildCreatedTasks(prev, input) ?? prev);
   }, []);
 
   const updateTask = useCallback((id: string, input: TaskInput) => {
-    setTasks((prev) => {
-      const current = prev.find((task) => task.id === id);
-      if (!current) return prev;
-
-      const nextParentId = input.parentId ?? current.parentId ?? null;
-      if (nextParentId && isDescendant(prev, id, nextParentId)) {
-        return prev;
-      }
-
-      return prev.map((task) => (task.id === id ? normalizeTask({ ...task, ...input, parentId: nextParentId }) : task));
-    });
+    setTasks((prev) => buildUpdatedTasks(prev, id, input) ?? prev);
   }, []);
 
   const moveTask = useCallback((id: string, parentId: string | null, options?: MoveTaskOptions) => {
@@ -311,5 +546,9 @@ export function useTasks() {
     );
   }, []);
 
-  return { tasks, visibleTasks, addTask, updateTask, moveTask, deleteTask, toggleTaskExpanded };
+  const replaceTasks = useCallback((nextTasks: Task[]) => {
+    setTasks(nextTasks.map(normalizeTask));
+  }, []);
+
+  return { tasks, visibleTasks, addTask, updateTask, moveTask, deleteTask, toggleTaskExpanded, replaceTasks };
 }

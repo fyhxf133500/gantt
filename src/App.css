@@ -34,6 +34,39 @@
   flex-wrap: wrap;
 }
 
+.gantt-chart-area {
+  position: relative;
+}
+
+.dependency-overlay-host {
+  position: absolute;
+  pointer-events: none;
+  overflow: hidden;
+  z-index: 3;
+}
+
+.dependency-overlay-svg {
+  display: block;
+  overflow: hidden;
+}
+
+.dependency-path {
+  fill: none;
+  stroke: #2563eb;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  opacity: 0.92;
+}
+
+.dependency-path--ss {
+  stroke: #0f766e;
+}
+
+.dependency-path--ff {
+  stroke: #b45309;
+}
+
 .gantt-empty {
   padding: 24px;
   border-radius: 12px;
@@ -222,6 +255,13 @@
   color: #0f172a;
 }
 
+.task-form-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
 .task-form-row {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -234,6 +274,32 @@
   border: 1px solid #cbd5f5;
   font-size: 14px;
   background: #ffffff;
+}
+
+.task-form-dependencies {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.task-form-dependency-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.6fr) minmax(0, 1.2fr) auto;
+  gap: 10px;
+  align-items: center;
+}
+
+.task-form-add-button {
+  align-self: flex-end;
+}
+
+.task-form-empty {
+  padding: 10px 12px;
+  border: 1px dashed #cbd5e1;
+  border-radius: 10px;
+  background: #f8fafc;
+  color: #64748b;
+  font-size: 13px;
 }
 
 .task-form-error {
@@ -251,6 +317,15 @@
 
 @media (max-width: 640px) {
   .task-form-row {
+    grid-template-columns: 1fr;
+  }
+
+  .task-form-section-header {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .task-form-dependency-row {
     grid-template-columns: 1fr;
   }
 }
