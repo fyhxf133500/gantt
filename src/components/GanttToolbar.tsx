@@ -13,15 +13,7 @@ const options: Array<{ label: string; mode: ViewMode }> = [
 
 export function GanttToolbar({ viewMode, onChange }: GanttToolbarProps) {
   return (
-    <div
-      role="toolbar"
-      aria-label="时间尺度"
-      style={{
-        display: "flex",
-        gap: 8,
-        alignItems: "center",
-      }}
-    >
+    <div className="view-mode-toggle" role="toolbar" aria-label="时间尺度">
       {options.map((option) => {
         const isActive = option.mode === viewMode;
         return (
@@ -30,15 +22,7 @@ export function GanttToolbar({ viewMode, onChange }: GanttToolbarProps) {
             type="button"
             onClick={() => onChange(option.mode)}
             aria-pressed={isActive}
-            style={{
-              padding: "6px 12px",
-              borderRadius: 999,
-              border: isActive ? "1px solid #2563eb" : "1px solid #cbd5f5",
-              background: isActive ? "#dbeafe" : "#ffffff",
-              color: "#0f172a",
-              fontSize: 14,
-              cursor: "pointer",
-            }}
+            className={isActive ? "view-mode-button view-mode-button--active" : "view-mode-button"}
           >
             {option.label}
           </button>

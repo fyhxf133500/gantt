@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { AppShell } from "../components/AppShell";
 import { GanttChart } from "../components/GanttChart";
 import { TaskFormModal } from "../components/TaskFormModal";
 import type { TaskFormData } from "../components/TaskFormModal";
@@ -27,6 +28,13 @@ export function Home() {
     criticalPathError,
     selectedSummaryTaskId,
     localCriticalPathError,
+    projects,
+    activeProject,
+    activeProjectId,
+    createProject,
+    selectProject,
+    renameProject,
+    deleteProject: deleteProjectRecord,
     moveTask,
     deleteTask,
     toggleTaskExpanded,
@@ -139,29 +147,38 @@ export function Home() {
   };
 
   return (
-    <div
-      className="page"
-      onClick={(event) => {
-        if (event.target === event.currentTarget) {
-          clearSelectedSummaryTask();
-        }
-      }}
+    <AppShell
+      projectName={activeProject?.name ?? "默认项目"}
+      projects={projects}
+      activeProjectId={activeProjectId}
+      onSelectProject={selectProject}
+      onCreateProject={createProject}
+      onRenameProject={renameProject}
+      onDeleteProject={deleteProjectRecord}
     >
-      <h1 className="page-title">项目甘特图</h1>
-      <GanttChart
-        tasks={visibleTasks}
-        criticalPathError={criticalPathError}
-        selectedSummaryTaskId={selectedSummaryTaskId}
-        localCriticalPathError={localCriticalPathError}
-        onCreateTask={handleCreateTask}
-        onEditTask={handleEditTask}
-        onDeleteTask={handleDeleteTask}
-        onUpdateTask={handleUpdateTask}
-        onToggleExpand={toggleTaskExpanded}
-        onMoveTask={moveTask}
-        onSelectSummaryTask={selectSummaryTask}
-        onClearSelectedSummaryTask={clearSelectedSummaryTask}
-      />
+      <div
+        className="page"
+        onClick={(event) => {
+          if (event.target === event.currentTarget) {
+            clearSelectedSummaryTask();
+          }
+        }}
+      >
+        <GanttChart
+          tasks={visibleTasks}
+          criticalPathError={criticalPathError}
+          selectedSummaryTaskId={selectedSummaryTaskId}
+          localCriticalPathError={localCriticalPathError}
+          onCreateTask={handleCreateTask}
+          onEditTask={handleEditTask}
+          onDeleteTask={handleDeleteTask}
+          onUpdateTask={handleUpdateTask}
+          onToggleExpand={toggleTaskExpanded}
+          onMoveTask={moveTask}
+          onSelectSummaryTask={selectSummaryTask}
+          onClearSelectedSummaryTask={clearSelectedSummaryTask}
+        />
+      </div>
       <TaskFormModal
         isOpen={isModalOpen}
         mode={editingTask ? "edit" : "create"}
@@ -184,6 +201,6 @@ export function Home() {
         onAutoSchedule={handleTimeConflictAutoSchedule}
         onCancel={handleTimeConflictCancel}
       />
-    </div>
+    </AppShell>
   );
 }

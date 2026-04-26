@@ -1,7 +1,15 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import type { Project } from "../types/project";
 import type { Task, TaskDependency } from "../types/task";
-import { mockTasks } from "../data/mockTasks";
-import { loadTasks, saveTasks } from "../services/taskService";
+import {
+  createProject as createStoredProject,
+  deleteProject as deleteStoredProject,
+  getActiveProjectId,
+  getProjects,
+  saveProjects,
+  setActiveProjectId as persistActiveProjectId,
+  updateProject as updateStoredProject,
+} from "../services/projectService";
 import { calculateCriticalPath, calculateLocalCriticalPath } from "../services/criticalPathService";
 
 export type TaskInput = Omit<Task, "id" | "isExpanded">;
@@ -40,6 +48,12 @@ const DEFAULT_PARENT_ID: string | null = null;
 const DEFAULT_DEPENDENCIES: TaskDependency[] = [];
 const DEFAULT_TASK_TYPE: Task["type"] = "task";
 const DEFAULT_EXPANDED = true;
+const EMPTY_TASKS: Task[] = [];
+
+type ProjectState = {
+  projects: Project[];
+  activeProjectId: string | null;
+};
 
 function createTaskId() {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
@@ -173,6 +187,33 @@ function normalizeTask(task: Task): Task {
     isCritical: false,
     isLocalCritical: false,
   };
+}
+
+function normalizeProject(project: Project): Project {
+  return {
+    ...project,
+    tasks: project.tasks.map(normalizeTask),
+  };
+}
+
+function resolveActiveProjectId(projects: Project[]) {
+  const storedActiveProjectId = getActiveProjectId();
+  if (storedActiveProjectId && projects.some((project) => project.id === storedActiveProjectId)) {
+    return storedActiveProjectId;
+  }
+
+  return projects[0]?.id ?? null;
+}
+
+function initializeProjectState(): ProjectState {
+  const projects = getProjects().map(normalizeProject);
+  const activeProjectId = resolveActiveProjectId(projects);
+
+  if (activeProjectId) {
+    persistActiveProjectId(activeProjectId);
+  }
+
+  return { projects, activeProjectId };
 }
 
 function buildChildrenMap(tasks: Task[]) {
@@ -468,21 +509,48 @@ export function flattenTasks(tree: TaskTreeNode[]): TaskRow[] {
 }
 
 export function useTasks() {
-  const [tasks, setTasks] = useState<Task[]>(() => {
-    const storedTasks = loadTasks();
-    const baseTasks = storedTasks ?? mockTasks;
-    return baseTasks.map(normalizeTask);
-  });
+  const [projectState, setProjectState] = useState<ProjectState>(initializeProjectState);
   const [selectedSummaryTaskId, setSelectedSummaryTaskId] = useState<string | null>(null);
+  const { projects, activeProjectId } = projectState;
+  const activeProject = useMemo(
+    () => projects.find((project) => project.id === activeProjectId) ?? projects[0] ?? null,
+    [activeProjectId, projects]
+  );
+  const tasks = activeProject?.tasks ?? EMPTY_TASKS;
+
+  useEffect(() => {
+    saveProjects(projects);
+  }, [projects]);
+
+  const setActiveProjectTasks = useCallback((updater: Task[] | ((prev: Task[]) => Task[])) => {
+    setProjectState((prev) => {
+      const activeProject = prev.projects.find((project) => project.id === prev.activeProjectId) ?? prev.projects[0];
+      if (!activeProject) return prev;
+
+      const nextTasks = typeof updater === "function" ? updater(activeProject.tasks) : updater;
+      if (nextTasks === activeProject.tasks) return prev;
+
+      const normalizedTasks = nextTasks.map(normalizeTask);
+      const nextProjects = prev.projects.map((project) =>
+        project.id === activeProject.id
+          ? { ...project, tasks: normalizedTasks, updatedAt: new Date().toISOString() }
+          : project
+      );
+
+      return { ...prev, projects: nextProjects };
+    });
+  }, []);
 
   useEffect(() => {
     const next = calculateParentSummary(tasks);
     if (next !== tasks) {
-      setTasks(next);
-      return;
+      setActiveProjectTasks(next);
     }
-    saveTasks(tasks);
-  }, [tasks]);
+  }, [setActiveProjectTasks, tasks]);
+
+  useEffect(() => {
+    setSelectedSummaryTaskId(null);
+  }, [activeProjectId]);
 
   useEffect(() => {
     if (!selectedSummaryTaskId) return;
@@ -533,15 +601,15 @@ export function useTasks() {
   const visibleTasks = useMemo(() => flattenTasks(taskTree), [taskTree]);
 
   const addTask = useCallback((input: TaskInput) => {
-    setTasks((prev) => buildCreatedTasks(prev, input) ?? prev);
-  }, []);
+    setActiveProjectTasks((prev) => buildCreatedTasks(prev, input) ?? prev);
+  }, [setActiveProjectTasks]);
 
   const updateTask = useCallback((id: string, input: TaskInput) => {
-    setTasks((prev) => buildUpdatedTasks(prev, id, input) ?? prev);
-  }, []);
+    setActiveProjectTasks((prev) => buildUpdatedTasks(prev, id, input) ?? prev);
+  }, [setActiveProjectTasks]);
 
   const moveTask = useCallback((id: string, parentId: string | null, options?: MoveTaskOptions) => {
-    setTasks((prev) => {
+    setActiveProjectTasks((prev) => {
       const current = prev.find((task) => task.id === id);
       if (!current) return prev;
 
@@ -573,10 +641,10 @@ export function useTasks() {
       remaining.splice(insertIndex, 0, updatedTask);
       return remaining;
     });
-  }, []);
+  }, [setActiveProjectTasks]);
 
   const deleteTask = useCallback((id: string, options?: DeleteTaskOptions) => {
-    setTasks((prev) => {
+    setActiveProjectTasks((prev) => {
       const current = prev.find((task) => task.id === id);
       if (!current) return prev;
 
@@ -594,20 +662,57 @@ export function useTasks() {
       const removeIds = new Set<string>([id, ...descendants]);
       return prev.filter((task) => !removeIds.has(task.id));
     });
-  }, []);
+  }, [setActiveProjectTasks]);
 
   const toggleTaskExpanded = useCallback((id: string) => {
-    setTasks((prev) =>
+    setActiveProjectTasks((prev) =>
       prev.map((task) => {
         if (task.id !== id) return task;
         const current = task.isExpanded !== false;
         return { ...task, isExpanded: !current };
       })
     );
-  }, []);
+  }, [setActiveProjectTasks]);
 
   const replaceTasks = useCallback((nextTasks: Task[]) => {
-    setTasks(nextTasks.map(normalizeTask));
+    setActiveProjectTasks(nextTasks.map(normalizeTask));
+  }, [setActiveProjectTasks]);
+
+  const createProject = useCallback((name: string) => {
+    const project = createStoredProject(name);
+    const nextProjects = getProjects().map(normalizeProject);
+    setProjectState({ projects: nextProjects, activeProjectId: project.id });
+    setSelectedSummaryTaskId(null);
+    return project;
+  }, []);
+
+  const selectProject = useCallback((projectId: string) => {
+    setProjectState((prev) => {
+      if (!prev.projects.some((project) => project.id === projectId)) return prev;
+      persistActiveProjectId(projectId);
+      return { ...prev, activeProjectId: projectId };
+    });
+    setSelectedSummaryTaskId(null);
+  }, []);
+
+  const renameProject = useCallback((projectId: string, name: string) => {
+    const updatedProject = updateStoredProject(projectId, { name });
+    if (!updatedProject) return null;
+
+    const nextProjects = getProjects().map(normalizeProject);
+    const nextActiveProjectId = resolveActiveProjectId(nextProjects);
+    setProjectState({ projects: nextProjects, activeProjectId: nextActiveProjectId });
+    return updatedProject;
+  }, []);
+
+  const deleteProject = useCallback((projectId: string) => {
+    const nextProjects = deleteStoredProject(projectId).map(normalizeProject);
+    const nextActiveProjectId = resolveActiveProjectId(nextProjects);
+    if (nextActiveProjectId) {
+      persistActiveProjectId(nextActiveProjectId);
+    }
+    setProjectState({ projects: nextProjects, activeProjectId: nextActiveProjectId });
+    setSelectedSummaryTaskId(null);
   }, []);
 
   const selectSummaryTask = useCallback((id: string) => {
@@ -619,6 +724,9 @@ export function useTasks() {
   }, []);
 
   return {
+    projects,
+    activeProject,
+    activeProjectId,
     tasks: tasksWithCriticalPaths,
     visibleTasks,
     criticalPathProjectEnd: criticalPath.projectEnd,
@@ -630,6 +738,10 @@ export function useTasks() {
     updateTask,
     moveTask,
     deleteTask,
+    createProject,
+    selectProject,
+    renameProject,
+    deleteProject,
     toggleTaskExpanded,
     replaceTasks,
     selectSummaryTask,

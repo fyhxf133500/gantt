@@ -103,7 +103,18 @@ type MilestoneOverlay = {
 const HEADER_HEIGHT = 50;
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 const HEADER_COLUMNS = ["任务名称", "开始时间", "结束时间", "操作"];
+const TASK_LIST_COLUMN_WIDTH = 155;
+const TASK_LIST_WIDTH = HEADER_COLUMNS.length * TASK_LIST_COLUMN_WIDTH;
+const TIMELINE_RIGHT_SAFE_WIDTH = 24;
+const DAY_COLUMN_WIDTH = 50;
+const WEEK_COLUMN_WIDTH = 92;
+const MONTH_COLUMN_WIDTH = 112;
+const DAY_HEADER_WEEKDAY_MIN_WIDTH = 46;
+const DAY_PRE_STEPS = 2;
+const WEEK_PRE_STEPS = 1;
+const MONTH_PRE_STEPS = 1;
 const DEPENDENCY_INDENT = 18;
+const RANGE_EXTENDER_TASK_ID = "__gantt-range-extender__";
 const MILESTONE_DIAMOND_SIZE = 16;
 const MILESTONE_BAR_HEIGHT = 18;
 const MILESTONE_LABEL_OFFSET = 12;
@@ -123,6 +134,18 @@ function formatDateYMD(date: Date) {
 function getDurationDays(start: Date, end: Date) {
   const diff = Math.floor((utcDayStamp(end) - utcDayStamp(start)) / MS_PER_DAY);
   return Math.max(0, diff + 1);
+}
+
+function addDays(date: Date, days: number) {
+  const next = new Date(date);
+  next.setDate(next.getDate() + days);
+  return next;
+}
+
+function addMonths(date: Date, months: number) {
+  const next = new Date(date);
+  next.setMonth(next.getMonth() + months);
+  return next;
 }
 
 function buildDependencyPath(
@@ -272,7 +295,6 @@ function TaskListTableContent({
   tasks,
   selectedTaskId,
   setSelectedTask,
-  onExpanderClick: _onExpanderClick,
   taskById,
   onEditTask,
   onDeleteTask,
@@ -285,6 +307,10 @@ function TaskListTableContent({
   const [draggingTaskId, setDraggingTaskId] = useState<string | null>(null);
   const [dropTargetId, setDropTargetId] = useState<string | null>(null);
   const [dropPosition, setDropPosition] = useState<"before" | "after" | "inside" | null>(null);
+  const displayTasks = useMemo(
+    () => tasks.filter((task) => task.id !== RANGE_EXTENDER_TASK_ID),
+    [tasks]
+  );
 
   const isInvalidDropTarget = (dragId: string, targetId: string) => {
     if (dragId === targetId) return true;
@@ -320,7 +346,7 @@ function TaskListTableContent({
         setDropPosition(null);
       }}
     >
-      {tasks.map((task) => {
+      {displayTasks.map((task) => {
         const originalTask = taskById.get(task.id);
         const level = originalTask?.level ?? 0;
         const hasChildren = originalTask?.hasChildren ?? false;
@@ -577,35 +603,148 @@ function getSvgHeight(svg: SVGElement) {
   return svg.getBoundingClientRect().height;
 }
 
+function getCalendarHeaderSvg(root: HTMLDivElement) {
+  const svgElements = Array.from(root.querySelectorAll<SVGSVGElement>("svg"));
+  return (
+    svgElements.find((svg) => {
+      const svgHeight = getSvgHeight(svg);
+      return Math.abs(svgHeight - HEADER_HEIGHT) <= 2;
+    }) ?? null
+  );
+}
+
+function splitDayHeaderText(value: string) {
+  const match = value.trim().match(/^(.+?)(?:[,，]|\s)\s*(\d{1,2})$/);
+  if (!match) return null;
+  return { weekday: match[1], day: match[2] };
+}
+
+function hasExpectedDayHeaderTspans(text: SVGTextElement, marker: string, showWeekday: boolean) {
+  if (text.dataset.ganttDayHeader !== marker) return false;
+
+  const dateLine = text.querySelector("tspan.calendar-day-date");
+  if (!dateLine) return false;
+
+  return showWeekday ? Boolean(text.querySelector("tspan.calendar-day-weekday")) : true;
+}
+
+function replaceTextWithTspan(text: SVGTextElement, weekday: string, day: string, columnWidth: number) {
+  const x = text.getAttribute("x") ?? "0";
+  const showWeekday = columnWidth >= DAY_HEADER_WEEKDAY_MIN_WIDTH;
+  const marker = showWeekday ? `${weekday}-${day}-full` : `${day}-compact`;
+
+  if (hasExpectedDayHeaderTspans(text, marker, showWeekday)) return;
+
+  text.textContent = "";
+  text.dataset.ganttDayHeader = marker;
+  text.setAttribute("text-anchor", "middle");
+  text.setAttribute("y", showWeekday ? "33" : "40");
+
+  if (!showWeekday) {
+    const dayOnly = document.createElementNS("http://www.w3.org/2000/svg", "tspan");
+    dayOnly.setAttribute("x", x);
+    dayOnly.setAttribute("dy", "0");
+    dayOnly.classList.add("calendar-day-date");
+    dayOnly.textContent = day;
+    text.appendChild(dayOnly);
+    return;
+  }
+
+  const weekdayLine = document.createElementNS("http://www.w3.org/2000/svg", "tspan");
+  weekdayLine.setAttribute("x", x);
+  weekdayLine.setAttribute("dy", "-0.35em");
+  weekdayLine.classList.add("calendar-day-weekday");
+  weekdayLine.textContent = weekday;
+
+  const dayLine = document.createElementNS("http://www.w3.org/2000/svg", "tspan");
+  dayLine.setAttribute("x", x);
+  dayLine.setAttribute("dy", "1.25em");
+  dayLine.classList.add("calendar-day-date");
+  dayLine.textContent = day;
+
+  text.appendChild(weekdayLine);
+  text.appendChild(dayLine);
+}
+
+function formatDayCalendarHeader(root: HTMLDivElement, columnWidth: number) {
+  const headerSvg = getCalendarHeaderSvg(root);
+  if (!headerSvg) return false;
+
+  const calendarTexts = Array.from(headerSvg.querySelectorAll<SVGTextElement>("text"));
+  let formatted = false;
+  calendarTexts.forEach((text) => {
+    const currentText = text.textContent ?? "";
+    const dayHeader = splitDayHeaderText(currentText);
+    if (!dayHeader) return;
+    replaceTextWithTspan(text, dayHeader.weekday, dayHeader.day, columnWidth);
+    formatted = true;
+  });
+  return formatted;
+}
+
 function utcDayStamp(date: Date) {
   return Date.UTC(date.getFullYear(), date.getMonth(), date.getDate());
 }
 
-function mondayStamp(date: Date) {
-  const utc = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
-  const day = utc.getUTCDay();
-  const diff = day === 0 ? -6 : 1 - day;
-  return Date.UTC(date.getFullYear(), date.getMonth(), date.getDate() + diff);
-}
-
-function getViewConfig(mode: ViewMode, earliestStart: Date | null) {
-  if (!earliestStart) {
-    if (mode === ViewMode.Month) return { columnWidth: 160, preStepsCount: 0 };
-    if (mode === ViewMode.Week) return { columnWidth: 120, preStepsCount: 0 };
-    return { columnWidth: 70, preStepsCount: 0 };
-  }
-
-  const yearStart = new Date(earliestStart.getFullYear(), 0, 1);
-  const dayDiff = Math.max(0, Math.floor((utcDayStamp(earliestStart) - utcDayStamp(yearStart)) / MS_PER_DAY));
-  const weekDiff = Math.max(0, Math.floor((mondayStamp(earliestStart) - mondayStamp(yearStart)) / (7 * MS_PER_DAY)));
-
+function getViewConfig(mode: ViewMode) {
   if (mode === ViewMode.Month) {
-    return { columnWidth: 160, preStepsCount: earliestStart.getMonth() };
+    return { columnWidth: MONTH_COLUMN_WIDTH, preStepsCount: MONTH_PRE_STEPS };
   }
   if (mode === ViewMode.Week) {
-    return { columnWidth: 120, preStepsCount: weekDiff };
+    return { columnWidth: WEEK_COLUMN_WIDTH, preStepsCount: WEEK_PRE_STEPS };
   }
-  return { columnWidth: 70, preStepsCount: dayDiff };
+  return { columnWidth: DAY_COLUMN_WIDTH, preStepsCount: DAY_PRE_STEPS };
+}
+
+function getRangeStart(earliestStart: Date, mode: ViewMode, preStepsCount: number) {
+  if (mode === ViewMode.Month) {
+    const monthStart = new Date(earliestStart.getFullYear(), earliestStart.getMonth(), 1);
+    return addMonths(monthStart, -preStepsCount);
+  }
+
+  if (mode === ViewMode.Week) {
+    const day = earliestStart.getDay();
+    const monday = addDays(earliestStart, day === 0 ? -6 : 1 - day);
+    const mondayStart = new Date(monday.getFullYear(), monday.getMonth(), monday.getDate());
+    return addDays(mondayStart, -7 * preStepsCount);
+  }
+
+  const dayStart = new Date(earliestStart.getFullYear(), earliestStart.getMonth(), earliestStart.getDate());
+  return addDays(dayStart, -preStepsCount);
+}
+
+function getGeneratedRangeEnd(latestEnd: Date, mode: ViewMode) {
+  const dayStart = new Date(latestEnd.getFullYear(), latestEnd.getMonth(), latestEnd.getDate());
+
+  if (mode === ViewMode.Month) {
+    return new Date(latestEnd.getFullYear() + 1, 0, 1);
+  }
+
+  if (mode === ViewMode.Week) {
+    return addMonths(dayStart, 1.5);
+  }
+
+  return addDays(dayStart, 19);
+}
+
+function getRequiredRangeEnd(rangeStart: Date, visibleTimelineWidth: number, columnWidth: number, mode: ViewMode) {
+  const availableWidth = Math.max(0, visibleTimelineWidth - columnWidth - TIMELINE_RIGHT_SAFE_WIDTH);
+  const visibleUnits = Math.max(1, Math.floor(availableWidth / columnWidth));
+
+  if (mode === ViewMode.Month) {
+    return addMonths(rangeStart, visibleUnits);
+  }
+
+  if (mode === ViewMode.Week) {
+    return addDays(rangeStart, visibleUnits * 7);
+  }
+
+  return addDays(rangeStart, visibleUnits);
+}
+
+function getLatestEnd(tasks: TaskRow[]) {
+  if (tasks.length === 0) return null;
+  return tasks.reduce<Date>((latest, task) => (task.end > latest ? task.end : latest), tasks[0].end);
 }
 
 function getViewDate(earliestStart: Date | null, mode: ViewMode) {
@@ -631,11 +770,30 @@ export function GanttChart({
   const [viewMode, setViewMode] = useState<ViewMode>(ViewMode.Day);
   const [showCriticalPath, setShowCriticalPath] = useState(true);
   const [dependencyOverlay, setDependencyOverlay] = useState<DependencyOverlayLayout | null>(null);
+  const [ganttWidth, setGanttWidth] = useState(0);
   const ganttContainerRef = useRef<HTMLDivElement | null>(null);
   const horizontalScrollRef = useRef<HTMLDivElement | null>(null);
+  const viewConfig = useMemo(() => getViewConfig(viewMode), [viewMode]);
+
+  useEffect(() => {
+    const root = ganttContainerRef.current;
+    if (!root) return undefined;
+
+    const updateWidth = () => {
+      setGanttWidth(root.clientWidth);
+    };
+
+    updateWidth();
+    const resizeObserver = new ResizeObserver(updateWidth);
+    resizeObserver.observe(root);
+
+    return () => {
+      resizeObserver.disconnect();
+    };
+  }, [tasks.length]);
 
   const ganttTasks = useMemo<GanttTask[]>(() => {
-    return tasks.map((task) => {
+    const mappedTasks = tasks.map((task) => {
       const isSummary = task.hasChildren;
       const isMilestone = (task.type ?? "task") === "milestone";
       const isCritical = showCriticalPath && task.isCritical && !isSummary;
@@ -647,7 +805,7 @@ export function GanttChart({
         start: task.start,
         end: task.end,
         progress: task.progress,
-        type: isSummary ? "project" : isMilestone ? "task" : task.type ?? "task",
+        type: (isSummary ? "project" : isMilestone ? "task" : task.type ?? "task") as GanttTask["type"],
         isDisabled: isSummary,
         styles: isSummary
           ? isCriticalSummary
@@ -682,7 +840,49 @@ export function GanttChart({
             : undefined,
       };
     });
-  }, [tasks, showCriticalPath]);
+
+    const earliestStart = tasks.length > 0
+      ? tasks.reduce<Date>((earliest, task) => (task.start < earliest ? task.start : earliest), tasks[0].start)
+      : null;
+    const latestEnd = getLatestEnd(tasks);
+    const visibleTimelineWidth = Math.max(0, ganttWidth - TASK_LIST_WIDTH);
+
+    if (!earliestStart || !latestEnd || visibleTimelineWidth <= 0) {
+      return mappedTasks;
+    }
+
+    const rangeStart = getRangeStart(earliestStart, viewMode, viewConfig.preStepsCount);
+    const generatedRangeEnd = getGeneratedRangeEnd(latestEnd, viewMode);
+    const requiredRangeEnd = getRequiredRangeEnd(
+      rangeStart,
+      visibleTimelineWidth,
+      viewConfig.columnWidth,
+      viewMode
+    );
+
+    if (generatedRangeEnd >= requiredRangeEnd) {
+      return mappedTasks;
+    }
+
+    return [
+      ...mappedTasks,
+      {
+        id: RANGE_EXTENDER_TASK_ID,
+        name: "",
+        start: requiredRangeEnd,
+        end: requiredRangeEnd,
+        progress: 0,
+        type: "task" as const,
+        isDisabled: true,
+        styles: {
+          backgroundColor: "transparent",
+          backgroundSelectedColor: "transparent",
+          progressColor: "transparent",
+          progressSelectedColor: "transparent",
+        },
+      },
+    ];
+  }, [ganttWidth, tasks, showCriticalPath, viewConfig.columnWidth, viewConfig.preStepsCount, viewMode]);
 
   const taskById = useMemo(() => new Map(tasks.map((task) => [task.id, task])), [tasks]);
 
@@ -855,8 +1055,48 @@ export function GanttChart({
     return tasks.reduce<Date>((earliest, task) => (task.start < earliest ? task.start : earliest), tasks[0].start);
   }, [tasks]);
 
-  const viewConfig = useMemo(() => getViewConfig(viewMode, earliestStart), [viewMode, earliestStart]);
   const viewDate = useMemo(() => getViewDate(earliestStart, viewMode), [earliestStart, viewMode]);
+
+  useEffect(() => {
+    if (viewMode !== ViewMode.Day) return undefined;
+    const root = ganttContainerRef.current;
+    if (!root) return undefined;
+
+    const frameIds: number[] = [];
+    const timeoutIds: number[] = [];
+    let isFormatting = false;
+
+    const scheduleFormat = () => {
+      if (isFormatting) return;
+      isFormatting = true;
+      const frameId = requestAnimationFrame(() => {
+        formatDayCalendarHeader(root, viewConfig.columnWidth);
+        isFormatting = false;
+      });
+      frameIds.push(frameId);
+    };
+
+    scheduleFormat();
+    timeoutIds.push(window.setTimeout(scheduleFormat, 60));
+    timeoutIds.push(window.setTimeout(scheduleFormat, 180));
+
+    const mutationObserver = new MutationObserver((mutations) => {
+      const hasCalendarMutation = mutations.some((mutation) => {
+        if (!(mutation.target instanceof Element)) return true;
+        return !mutation.target.closest(".dependency-overlay-host");
+      });
+      if (hasCalendarMutation) {
+        scheduleFormat();
+      }
+    });
+    mutationObserver.observe(root, { subtree: true, childList: true, characterData: true });
+
+    return () => {
+      frameIds.forEach((frameId) => cancelAnimationFrame(frameId));
+      timeoutIds.forEach((timeoutId) => window.clearTimeout(timeoutId));
+      mutationObserver.disconnect();
+    };
+  }, [tasks, viewMode, viewConfig.columnWidth]);
 
   const TaskListTable = useMemo(() => {
     const Table: FC<TaskListTableBaseProps> = (props) => (
@@ -961,19 +1201,21 @@ export function GanttChart({
   return (
     <div className="gantt-wrapper">
       <div className="gantt-toolbar">
-        <GanttToolbar viewMode={viewMode} onChange={setViewMode} />
-        <div className="gantt-toolbar-actions">
-          <label className="critical-path-toggle">
-            <input
-              type="checkbox"
-              checked={showCriticalPath}
-              onChange={(event) => setShowCriticalPath(event.target.checked)}
-            />
-            <span>关键路径</span>
-          </label>
-          <button type="button" className="primary-button" onClick={onCreateTask}>
-            + 新建任务
-          </button>
+        <div className="gantt-toolbar-controls">
+          <GanttToolbar viewMode={viewMode} onChange={setViewMode} />
+          <div className="gantt-toolbar-actions">
+            <label className="critical-path-toggle">
+              <input
+                type="checkbox"
+                checked={showCriticalPath}
+                onChange={(event) => setShowCriticalPath(event.target.checked)}
+              />
+              <span>关键路径</span>
+            </label>
+            <button type="button" className="primary-button" onClick={onCreateTask}>
+              + 新建任务
+            </button>
+          </div>
         </div>
       </div>
       {criticalPathError && showCriticalPath && (
@@ -987,13 +1229,12 @@ export function GanttChart({
         </div>
       )}
       {tasks.length === 0 ? (
-        <div className="gantt-empty" style={{ marginTop: 12 }}>
+        <div className="gantt-empty">
           暂无任务
         </div>
       ) : (
         <div
           className="gantt-chart-area"
-          style={{ marginTop: 12 }}
           onWheel={handleWheel}
           onClick={handleChartAreaClick}
           ref={ganttContainerRef}
