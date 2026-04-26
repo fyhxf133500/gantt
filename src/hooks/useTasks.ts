@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import type { Task, TaskDependency } from "../types/task";
 import { mockTasks } from "../data/mockTasks";
 import { loadTasks, saveTasks } from "../services/taskService";
+import { calculateCriticalPath, calculateLocalCriticalPath } from "../services/criticalPathService";
 
 export type TaskInput = Omit<Task, "id" | "isExpanded">;
 
@@ -50,13 +51,24 @@ function createTaskId() {
 function normalizeDependencies(dependencies: Task["dependencies"]): TaskDependency[] {
   if (!Array.isArray(dependencies)) return DEFAULT_DEPENDENCIES;
 
-  return dependencies.filter(
-    (dependency): dependency is TaskDependency =>
-      Boolean(dependency) &&
-      typeof dependency === "object" &&
-      typeof dependency.taskId === "string" &&
-      (dependency.type === "FS" || dependency.type === "SS" || dependency.type === "FF")
-  );
+  return dependencies.flatMap((dependency) => {
+    if (
+      !dependency ||
+      typeof dependency !== "object" ||
+      typeof dependency.taskId !== "string" ||
+      (dependency.type !== "FS" && dependency.type !== "SS" && dependency.type !== "FF")
+    ) {
+      return [];
+    }
+
+    return [
+      {
+        taskId: dependency.taskId,
+        type: dependency.type,
+        lag: Number.isFinite(dependency.lag) ? dependency.lag : undefined,
+      },
+    ];
+  });
 }
 
 export function hasInvalidDependencies(tasks: Task[], taskId: string, dependencies: TaskDependency[]) {
@@ -158,6 +170,8 @@ function normalizeTask(task: Task): Task {
     dependencies: normalizeDependencies(task.dependencies),
     type: task.type ?? DEFAULT_TASK_TYPE,
     isExpanded: task.isExpanded ?? DEFAULT_EXPANDED,
+    isCritical: false,
+    isLocalCritical: false,
   };
 }
 
@@ -459,6 +473,7 @@ export function useTasks() {
     const baseTasks = storedTasks ?? mockTasks;
     return baseTasks.map(normalizeTask);
   });
+  const [selectedSummaryTaskId, setSelectedSummaryTaskId] = useState<string | null>(null);
 
   useEffect(() => {
     const next = calculateParentSummary(tasks);
@@ -469,7 +484,52 @@ export function useTasks() {
     saveTasks(tasks);
   }, [tasks]);
 
-  const taskTree = useMemo(() => buildTaskTree(tasks), [tasks]);
+  useEffect(() => {
+    if (!selectedSummaryTaskId) return;
+    const childrenMap = buildChildrenMap(tasks);
+    if (!childrenMap.has(selectedSummaryTaskId)) {
+      setSelectedSummaryTaskId(null);
+    }
+  }, [tasks, selectedSummaryTaskId]);
+
+  const criticalPath = useMemo(() => calculateCriticalPath(tasks), [tasks]);
+  const localCriticalPath = useMemo(
+    () => calculateLocalCriticalPath(criticalPath.tasks, selectedSummaryTaskId),
+    [criticalPath.tasks, selectedSummaryTaskId]
+  );
+  const tasksWithCriticalPaths = useMemo(() => {
+    const childrenMap = buildChildrenMap(criticalPath.tasks);
+    const localScopeIds = selectedSummaryTaskId
+      ? new Set<string>([selectedSummaryTaskId, ...collectDescendants(childrenMap, selectedSummaryTaskId)])
+      : new Set<string>();
+    const localDescendantMemo = new Map<string, boolean>();
+    const hasLocalCriticalDescendant = (taskId: string): boolean => {
+      if (localDescendantMemo.has(taskId)) return localDescendantMemo.get(taskId)!;
+      const result = (childrenMap.get(taskId) ?? []).some((childId) => {
+        if (localCriticalPath.criticalTaskIds.has(childId)) return true;
+        return hasLocalCriticalDescendant(childId);
+      });
+      localDescendantMemo.set(taskId, result);
+      return result;
+    };
+
+    return criticalPath.tasks.map((task) => {
+      const isSummary = childrenMap.has(task.id);
+      const isLocalCritical = isSummary
+        ? localScopeIds.has(task.id) && hasLocalCriticalDescendant(task.id)
+        : localCriticalPath.criticalTaskIds.has(task.id);
+
+      return {
+        ...task,
+        isLocalCritical,
+        dependencies: normalizeDependencies(task.dependencies).map((dependency) => ({
+          ...dependency,
+          isLocalCritical: localCriticalPath.criticalDependencyKeys.has(`${task.id}-${dependency.taskId}-${dependency.type}`),
+        })),
+      };
+    });
+  }, [criticalPath.tasks, localCriticalPath.criticalDependencyKeys, localCriticalPath.criticalTaskIds, selectedSummaryTaskId]);
+  const taskTree = useMemo(() => buildTaskTree(tasksWithCriticalPaths), [tasksWithCriticalPaths]);
   const visibleTasks = useMemo(() => flattenTasks(taskTree), [taskTree]);
 
   const addTask = useCallback((input: TaskInput) => {
@@ -550,5 +610,29 @@ export function useTasks() {
     setTasks(nextTasks.map(normalizeTask));
   }, []);
 
-  return { tasks, visibleTasks, addTask, updateTask, moveTask, deleteTask, toggleTaskExpanded, replaceTasks };
+  const selectSummaryTask = useCallback((id: string) => {
+    setSelectedSummaryTaskId(id);
+  }, []);
+
+  const clearSelectedSummaryTask = useCallback(() => {
+    setSelectedSummaryTaskId(null);
+  }, []);
+
+  return {
+    tasks: tasksWithCriticalPaths,
+    visibleTasks,
+    criticalPathProjectEnd: criticalPath.projectEnd,
+    criticalPathError: criticalPath.error,
+    selectedSummaryTaskId,
+    localCriticalTaskIds: localCriticalPath.criticalTaskIds,
+    localCriticalPathError: localCriticalPath.error,
+    addTask,
+    updateTask,
+    moveTask,
+    deleteTask,
+    toggleTaskExpanded,
+    replaceTasks,
+    selectSummaryTask,
+    clearSelectedSummaryTask,
+  };
 }

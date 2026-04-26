@@ -11,7 +11,7 @@ type StoredTask = Omit<Task, "start" | "end"> & {
 };
 
 type LegacyStoredTask = Omit<StoredTask, "dependencies"> & {
-  dependencies?: string[] | TaskDependency[];
+  dependencies?: Array<string | TaskDependency>;
 };
 
 function isStorageAvailable() {
@@ -58,7 +58,11 @@ function toStoredTask(task: Task): StoredTask {
     start: formatDate(task.start),
     end: formatDate(task.end),
     parentId: task.parentId ?? null,
-    dependencies: task.dependencies ?? [],
+    dependencies: (task.dependencies ?? []).map((dependency) => ({
+      taskId: dependency.taskId,
+      type: dependency.type,
+      lag: Number.isFinite(dependency.lag) ? dependency.lag : undefined,
+    })),
     type: task.type ?? "task",
     isExpanded: task.isExpanded ?? true,
   };
@@ -71,7 +75,7 @@ function isDependencyType(value: unknown): value is DependencyType {
 function normalizeStoredDependencies(dependencies: LegacyStoredTask["dependencies"]): TaskDependency[] {
   if (!Array.isArray(dependencies)) return [];
 
-  return dependencies.flatMap((dependency) => {
+  return dependencies.flatMap<TaskDependency>((dependency) => {
     if (typeof dependency === "string") {
       return [{ taskId: dependency, type: "FS" as const }];
     }
@@ -82,7 +86,13 @@ function normalizeStoredDependencies(dependencies: LegacyStoredTask["dependencie
       typeof dependency.taskId === "string" &&
       isDependencyType(dependency.type)
     ) {
-      return [{ taskId: dependency.taskId, type: dependency.type }];
+      return [
+        {
+          taskId: dependency.taskId,
+          type: dependency.type,
+          lag: Number.isFinite(dependency.lag) ? dependency.lag : undefined,
+        },
+      ];
     }
 
     return [];

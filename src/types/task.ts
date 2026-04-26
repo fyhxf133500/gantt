@@ -3,6 +3,9 @@
 export interface TaskDependency {
   taskId: string;
   type: DependencyType;
+  lag?: number;
+  isCritical?: boolean;
+  isLocalCritical?: boolean;
 }
 
 export interface Task {
@@ -15,4 +18,6 @@ export interface Task {
   dependencies?: TaskDependency[];
   type?: "task" | "milestone";
   isExpanded?: boolean;
+  isCritical?: boolean;
+  isLocalCritical?: boolean;
 }

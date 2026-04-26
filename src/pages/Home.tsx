@@ -21,7 +21,19 @@ type PendingConflictState = {
 };
 
 export function Home() {
-  const { tasks, visibleTasks, moveTask, deleteTask, toggleTaskExpanded, replaceTasks } = useTasks();
+  const {
+    tasks,
+    visibleTasks,
+    criticalPathError,
+    selectedSummaryTaskId,
+    localCriticalPathError,
+    moveTask,
+    deleteTask,
+    toggleTaskExpanded,
+    replaceTasks,
+    selectSummaryTask,
+    clearSelectedSummaryTask,
+  } = useTasks();
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingTask, setEditingTask] = useState<Task | null>(null);
   const [deleteDialogTask, setDeleteDialogTask] = useState<Task | null>(null);
@@ -127,16 +139,28 @@ export function Home() {
   };
 
   return (
-    <div className="page">
+    <div
+      className="page"
+      onClick={(event) => {
+        if (event.target === event.currentTarget) {
+          clearSelectedSummaryTask();
+        }
+      }}
+    >
       <h1 className="page-title">项目甘特图</h1>
       <GanttChart
         tasks={visibleTasks}
+        criticalPathError={criticalPathError}
+        selectedSummaryTaskId={selectedSummaryTaskId}
+        localCriticalPathError={localCriticalPathError}
         onCreateTask={handleCreateTask}
         onEditTask={handleEditTask}
         onDeleteTask={handleDeleteTask}
         onUpdateTask={handleUpdateTask}
         onToggleExpand={toggleTaskExpanded}
         onMoveTask={moveTask}
+        onSelectSummaryTask={selectSummaryTask}
+        onClearSelectedSummaryTask={clearSelectedSummaryTask}
       />
       <TaskFormModal
         isOpen={isModalOpen}
