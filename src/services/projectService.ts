@@ -1,6 +1,6 @@
 import { mockTasks } from "../data/mockTasks";
 import type { Project } from "../types/project";
-import type { DependencyType, Task, TaskDependency } from "../types/task";
+import type { DependencyType, MilestoneStatus, Task, TaskDependency } from "../types/task";
 
 const PROJECTS_STORAGE_KEY = "gantt_projects";
 const ACTIVE_PROJECT_STORAGE_KEY = "gantt_active_project_id";
@@ -20,7 +20,7 @@ type LegacyStoredTask = Omit<StoredTask, "dependencies"> & {
   dependencies?: Array<string | TaskDependency>;
 };
 
-export type ProjectUpdates = Partial<Pick<Project, "name" | "tasks">>;
+export type ProjectUpdates = Partial<Pick<Project, "name" | "tasks" | "isTemplate">>;
 
 function isStorageAvailable() {
   return typeof window !== "undefined" && !!window.localStorage;
@@ -48,6 +48,10 @@ function parseDate(value: string) {
 
 function isDependencyType(value: unknown): value is DependencyType {
   return value === "FS" || value === "SS" || value === "FF";
+}
+
+function isMilestoneStatus(value: unknown): value is MilestoneStatus {
+  return value === "pending" || value === "ready" || value === "passed";
 }
 
 function normalizeStoredDependencies(dependencies: LegacyStoredTask["dependencies"]): TaskDependency[] {
@@ -91,6 +95,8 @@ function toStoredTask(task: Task): StoredTask {
       lag: Number.isFinite(dependency.lag) ? dependency.lag : undefined,
     })),
     type: task.type ?? "task",
+    milestoneStatus: task.type === "milestone" ? task.milestoneStatus ?? "pending" : undefined,
+    passedAt: task.type === "milestone" && task.passedAt ? task.passedAt : undefined,
     isExpanded: task.isExpanded ?? true,
   };
 }
@@ -111,11 +117,17 @@ function fromStoredTask(task: LegacyStoredTask): Task | null {
     id: task.id,
     name: task.name,
     start: parsedStart,
-    end: parsedEnd,
+    end: task.type === "milestone" ? parsedStart : parsedEnd,
     progress: Math.max(0, Math.min(100, progress)),
     parentId,
     dependencies: normalizeStoredDependencies(task.dependencies),
     type: task.type === "milestone" ? "milestone" : "task",
+    milestoneStatus: task.type === "milestone" && isMilestoneStatus(task.milestoneStatus)
+      ? task.milestoneStatus
+      : task.type === "milestone"
+        ? "pending"
+        : undefined,
+    passedAt: task.type === "milestone" && typeof task.passedAt === "string" ? task.passedAt : undefined,
     isExpanded: typeof task.isExpanded === "boolean" ? task.isExpanded : true,
   };
 }
@@ -128,6 +140,8 @@ function cloneTask(task: Task): Task {
     parentId: task.parentId ?? null,
     dependencies: (task.dependencies ?? []).map((dependency) => ({ ...dependency })),
     type: task.type ?? "task",
+    milestoneStatus: task.type === "milestone" ? task.milestoneStatus ?? "pending" : undefined,
+    passedAt: task.type === "milestone" ? task.passedAt : undefined,
     isExpanded: task.isExpanded ?? true,
   };
 }
@@ -135,14 +149,77 @@ function cloneTask(task: Task): Task {
 function cloneProject(project: Project): Project {
   return {
     ...project,
+    isTemplate: project.isTemplate === true ? true : undefined,
     tasks: project.tasks.map(cloneTask),
   };
+}
+
+function getUniqueProjectName(projects: Project[], baseName: string) {
+  const names = new Set(projects.map((project) => project.name));
+
+  if (!names.has(baseName)) return baseName;
+
+  let index = 2;
+  while (names.has(`${baseName} ${index}`)) {
+    index += 1;
+  }
+
+  return `${baseName} ${index}`;
+}
+
+function getUniqueDuplicateProjectName(projects: Project[], sourceName: string) {
+  return getUniqueProjectName(projects, `${sourceName} 副本`);
+}
+
+function getUniqueTemplateName(projects: Project[], sourceName: string) {
+  return getUniqueProjectName(projects, `${sourceName} 模板`);
+}
+
+function getProjectNameFromTemplate(projects: Project[], templateName: string) {
+  const baseName = templateName.replace(/\s*模板\s*$/, "").trim() || templateName;
+  return getUniqueProjectName(projects, `${baseName} 新项目`);
+}
+
+function cloneTasksWithNewIds(tasks: Task[]) {
+  const idMap = new Map(tasks.map((task) => [task.id, createId("task")]));
+
+  return tasks.map((task) => {
+    const nextTaskId = idMap.get(task.id) ?? createId("task");
+    const nextParentId = task.parentId ? idMap.get(task.parentId) ?? null : null;
+    const nextDependencies = (task.dependencies ?? []).flatMap<TaskDependency>((dependency) => {
+      const nextDependencyTaskId = idMap.get(dependency.taskId);
+      if (!nextDependencyTaskId) return [];
+
+      return [
+        {
+          taskId: nextDependencyTaskId,
+          type: dependency.type,
+          lag: Number.isFinite(dependency.lag) ? dependency.lag : undefined,
+        },
+      ];
+    });
+
+    return {
+      id: nextTaskId,
+      name: task.name,
+      start: new Date(task.start),
+      end: new Date(task.end),
+      progress: task.progress,
+      parentId: nextParentId,
+      dependencies: nextDependencies,
+      type: task.type ?? "task",
+      milestoneStatus: task.type === "milestone" ? task.milestoneStatus ?? "pending" : undefined,
+      passedAt: task.type === "milestone" ? task.passedAt : undefined,
+      isExpanded: task.isExpanded ?? true,
+    };
+  });
 }
 
 function toStoredProject(project: Project): StoredProject {
   return {
     id: project.id,
     name: project.name,
+    isTemplate: project.isTemplate === true ? true : undefined,
     createdAt: project.createdAt,
     updatedAt: project.updatedAt,
     tasks: project.tasks.map(toStoredTask),
@@ -160,6 +237,7 @@ function fromStoredProject(project: StoredProject): Project | null {
     id: project.id,
     name: project.name,
     tasks,
+    isTemplate: project.isTemplate === true ? true : undefined,
     createdAt: typeof project.createdAt === "string" ? project.createdAt : undefined,
     updatedAt: typeof project.updatedAt === "string" ? project.updatedAt : undefined,
   };
@@ -171,6 +249,7 @@ function createDefaultProject(tasks: Task[] = mockTasks): Project {
     id: createId("project"),
     name: DEFAULT_PROJECT_NAME,
     tasks: tasks.map(cloneTask),
+    isTemplate: undefined,
     createdAt: now,
     updatedAt: now,
   };
@@ -212,7 +291,7 @@ function ensureActiveProject(projects: Project[]) {
   const activeProjectId = getActiveProjectId();
   const nextActiveProjectId = projects.some((project) => project.id === activeProjectId)
     ? activeProjectId
-    : projects[0]?.id ?? null;
+    : projects.find((project) => !project.isTemplate)?.id ?? projects[0]?.id ?? null;
 
   if (nextActiveProjectId) {
     setActiveProjectId(nextActiveProjectId);
@@ -248,6 +327,7 @@ export function createProject(name: string) {
     id: createId("project"),
     name: name.trim() || "新项目",
     tasks: [],
+    isTemplate: undefined,
     createdAt: now,
     updatedAt: now,
   };
@@ -255,6 +335,62 @@ export function createProject(name: string) {
   saveProjects([...projects, project]);
   setActiveProjectId(project.id);
   return cloneProject(project);
+}
+
+function createProjectCopy(
+  projects: Project[],
+  sourceProject: Project,
+  name: string,
+  options: { isTemplate?: boolean; activate?: boolean }
+) {
+  const now = new Date().toISOString();
+  const project: Project = {
+    id: createId("project"),
+    name,
+    tasks: cloneTasksWithNewIds(sourceProject.tasks),
+    isTemplate: options.isTemplate === true ? true : undefined,
+    createdAt: now,
+    updatedAt: now,
+  };
+
+  saveProjects([...projects, project]);
+  if (options.activate) {
+    setActiveProjectId(project.id);
+  }
+  return cloneProject(project);
+}
+
+export function duplicateProject(projectId: string) {
+  const projects = getProjects();
+  const sourceProject = projects.find((project) => project.id === projectId);
+  if (!sourceProject) return null;
+
+  return createProjectCopy(projects, sourceProject, getUniqueDuplicateProjectName(projects, sourceProject.name), {
+    isTemplate: sourceProject.isTemplate === true,
+    activate: sourceProject.isTemplate !== true,
+  });
+}
+
+export function saveProjectAsTemplate(projectId: string) {
+  const projects = getProjects();
+  const sourceProject = projects.find((project) => project.id === projectId);
+  if (!sourceProject) return null;
+
+  return createProjectCopy(projects, sourceProject, getUniqueTemplateName(projects, sourceProject.name), {
+    isTemplate: true,
+    activate: false,
+  });
+}
+
+export function createProjectFromTemplate(templateId: string) {
+  const projects = getProjects();
+  const sourceTemplate = projects.find((project) => project.id === templateId);
+  if (!sourceTemplate) return null;
+
+  return createProjectCopy(projects, sourceTemplate, getProjectNameFromTemplate(projects, sourceTemplate.name), {
+    isTemplate: false,
+    activate: true,
+  });
 }
 
 export function updateProject(projectId: string, updates: ProjectUpdates) {
@@ -269,6 +405,7 @@ export function updateProject(projectId: string, updates: ProjectUpdates) {
       ...updates,
       name: updates.name?.trim() || project.name,
       tasks: updates.tasks ? updates.tasks.map(cloneTask) : project.tasks.map(cloneTask),
+      isTemplate: updates.isTemplate ?? project.isTemplate,
       updatedAt: now,
     };
     return updatedProject;

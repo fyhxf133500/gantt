@@ -1,4 +1,6 @@
-﻿export type DependencyType = "FS" | "SS" | "FF";
+export type DependencyType = "FS" | "SS" | "FF";
+export type MilestoneStatus = "pending" | "ready" | "passed";
+export type ScheduleStatus = "notStarted" | "inProgress" | "completed" | "overdue" | "atRisk";
 
 export interface TaskDependency {
   taskId: string;
@@ -17,7 +19,11 @@ export interface Task {
   parentId?: string | null;
   dependencies?: TaskDependency[];
   type?: "task" | "milestone";
+  milestoneStatus?: MilestoneStatus;
+  passedAt?: string;
   isExpanded?: boolean;
   isCritical?: boolean;
   isLocalCritical?: boolean;
+  scheduleStatus?: ScheduleStatus;
+  isMilestoneOverdue?: boolean;
 }

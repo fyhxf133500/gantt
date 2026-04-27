@@ -1,4 +1,5 @@
 ﻿import type { DependencyType, Task, TaskDependency } from "../types/task";
+import type { MilestoneStatus } from "../types/task";
 
 const STORAGE_KEY = "gantt_tasks";
 const STORAGE_VERSION_KEY = "gantt_tasks_version";
@@ -64,12 +65,18 @@ function toStoredTask(task: Task): StoredTask {
       lag: Number.isFinite(dependency.lag) ? dependency.lag : undefined,
     })),
     type: task.type ?? "task",
+    milestoneStatus: task.type === "milestone" ? task.milestoneStatus ?? "pending" : undefined,
+    passedAt: task.type === "milestone" && task.passedAt ? task.passedAt : undefined,
     isExpanded: task.isExpanded ?? true,
   };
 }
 
 function isDependencyType(value: unknown): value is DependencyType {
   return value === "FS" || value === "SS" || value === "FF";
+}
+
+function isMilestoneStatus(value: unknown): value is MilestoneStatus {
+  return value === "pending" || value === "ready" || value === "passed";
 }
 
 function normalizeStoredDependencies(dependencies: LegacyStoredTask["dependencies"]): TaskDependency[] {
@@ -111,16 +118,23 @@ function fromStoredTask(task: LegacyStoredTask): Task | null {
   const parentId = typeof task.parentId === "string" ? task.parentId : null;
   const type: Task["type"] = task.type === "milestone" ? "milestone" : "task";
   const isExpanded = typeof task.isExpanded === "boolean" ? task.isExpanded : true;
+  const milestoneStatus = type === "milestone" && isMilestoneStatus(task.milestoneStatus)
+    ? task.milestoneStatus
+    : type === "milestone"
+      ? "pending"
+      : undefined;
 
   return {
     id: task.id,
     name: task.name,
     start: parsedStart,
-    end: parsedEnd,
+    end: type === "milestone" ? parsedStart : parsedEnd,
     progress: Math.max(0, Math.min(100, progress)),
     parentId,
     dependencies,
     type,
+    milestoneStatus,
+    passedAt: type === "milestone" && typeof task.passedAt === "string" ? task.passedAt : undefined,
     isExpanded,
   };
 }

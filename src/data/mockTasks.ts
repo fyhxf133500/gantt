@@ -50,5 +50,6 @@ export const mockTasks: Task[] = [
     parentId: "p1",
     dependencies: [{ taskId: "t3", type: "FS" }],
     type: "milestone",
+    milestoneStatus: "pending",
   },
 ];

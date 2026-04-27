@@ -93,6 +93,7 @@ function normalizeDependencies(dependencies: Task["dependencies"]): TaskDependen
 }
 
 function getTaskDuration(task: Task) {
+  if (task.type === "milestone") return 0;
   return Math.max(0, task.end.getTime() - task.start.getTime());
 }
 

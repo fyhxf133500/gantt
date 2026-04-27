@@ -88,6 +88,36 @@
   font-weight: 600;
 }
 
+.project-search-input {
+  width: 100%;
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: #ffffff;
+  color: var(--text-primary);
+  font-size: 13px;
+  outline: none;
+  transition:
+    border-color 120ms ease,
+    box-shadow 120ms ease,
+    background-color 120ms ease;
+}
+
+.project-search-input::placeholder {
+  color: #94a3b8;
+}
+
+.project-search-input:hover {
+  border-color: #cbd5e1;
+  background: #f8fafc;
+}
+
+.project-search-input:focus {
+  border-color: #93c5fd;
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.14);
+}
+
 .new-project-button {
   width: 100%;
   padding: 8px 10px;
@@ -112,6 +142,31 @@
   gap: 4px;
   min-height: 0;
   overflow: auto;
+}
+
+.project-list-empty {
+  padding: 10px 8px;
+  color: var(--text-muted);
+  font-size: 13px;
+  text-align: center;
+}
+
+.project-list-section {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.project-list-section + .project-list-section {
+  margin-top: 10px;
+}
+
+.project-list-section-title {
+  padding: 6px 8px 4px;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
 }
 
 .project-list-item {
@@ -196,6 +251,11 @@
   border-radius: 50%;
   background: var(--accent);
   box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.1);
+}
+
+.project-list-dot--template {
+  background: #10b981;
+  box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.12);
 }
 
 .project-list-name {
@@ -353,13 +413,62 @@
 .gantt-toolbar {
   display: flex;
   align-items: center;
-  justify-content: flex-end;
+  justify-content: space-between;
   gap: 16px;
   flex-wrap: wrap;
   flex: 0 0 auto;
   padding: 12px 14px;
   border-bottom: 1px solid var(--border-subtle);
   background: #ffffff;
+}
+
+.gantt-toolbar-filters {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 280px;
+  flex: 1 1 360px;
+}
+
+.task-search-input,
+.task-filter-select {
+  height: 32px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: #ffffff;
+  color: var(--text-primary);
+  font-size: 13px;
+  outline: none;
+  transition:
+    border-color 0.16s ease,
+    box-shadow 0.16s ease,
+    background-color 0.16s ease;
+}
+
+.task-search-input {
+  width: min(260px, 100%);
+  padding: 0 11px;
+}
+
+.task-filter-select {
+  min-width: 126px;
+  padding: 0 28px 0 10px;
+}
+
+.task-search-input::placeholder {
+  color: #94a3b8;
+}
+
+.task-search-input:hover,
+.task-filter-select:hover {
+  border-color: #cbd5e1;
+  background: #f8fafc;
+}
+
+.task-search-input:focus,
+.task-filter-select:focus {
+  border-color: #93c5fd;
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.14);
 }
 
 .gantt-toolbar-controls {
@@ -722,6 +831,82 @@
 .task-list-actions {
   display: flex;
   gap: 8px;
+}
+
+.milestone-status-cell {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.milestone-status-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 48px;
+  height: 22px;
+  padding: 0 8px;
+  border-radius: 999px;
+  border: 1px solid #e2e8f0;
+  background: #f8fafc;
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.milestone-status-cell .task-action-button--compact {
+  flex: 0 0 auto;
+}
+
+.milestone-status-badge--pending {
+  border-color: #cbd5e1;
+  background: #f8fafc;
+  color: #475569;
+}
+
+.milestone-status-badge--notStarted {
+  border-color: #cbd5e1;
+  background: #f8fafc;
+  color: #475569;
+}
+
+.milestone-status-badge--inProgress {
+  border-color: #bfdbfe;
+  background: #eff6ff;
+  color: #1d4ed8;
+}
+
+.milestone-status-badge--completed {
+  border-color: #bbf7d0;
+  background: #f0fdf4;
+  color: #15803d;
+}
+
+.milestone-status-badge--ready {
+  border-color: #fde68a;
+  background: #fffbeb;
+  color: #92400e;
+}
+
+.milestone-status-badge--overdue {
+  border-color: #fecaca;
+  background: #fff1f2;
+  color: #b91c1c;
+}
+
+.milestone-status-badge--passed {
+  border-color: #bbf7d0;
+  background: #f0fdf4;
+  color: #15803d;
+}
+
+.task-action-button--compact {
+  padding: 3px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  white-space: nowrap;
 }
 
 .task-action-button {

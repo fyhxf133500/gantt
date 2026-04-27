@@ -3,9 +3,12 @@ import type { Project } from "../types/project";
 import type { Task, TaskDependency } from "../types/task";
 import {
   createProject as createStoredProject,
+  createProjectFromTemplate as createStoredProjectFromTemplate,
   deleteProject as deleteStoredProject,
+  duplicateProject as duplicateStoredProject,
   getActiveProjectId,
   getProjects,
+  saveProjectAsTemplate as saveStoredProjectAsTemplate,
   saveProjects,
   setActiveProjectId as persistActiveProjectId,
   updateProject as updateStoredProject,
@@ -47,6 +50,7 @@ export type DependencyConflict = {
 const DEFAULT_PARENT_ID: string | null = null;
 const DEFAULT_DEPENDENCIES: TaskDependency[] = [];
 const DEFAULT_TASK_TYPE: Task["type"] = "task";
+const DEFAULT_MILESTONE_STATUS: NonNullable<Task["milestoneStatus"]> = "pending";
 const DEFAULT_EXPANDED = true;
 const EMPTY_TASKS: Task[] = [];
 
@@ -83,6 +87,25 @@ function normalizeDependencies(dependencies: Task["dependencies"]): TaskDependen
       },
     ];
   });
+}
+
+function utcDayStamp(date: Date) {
+  return Date.UTC(date.getFullYear(), date.getMonth(), date.getDate());
+}
+
+function getUnpassedMilestoneStatus(task: Task, date = new Date()): NonNullable<Task["milestoneStatus"]> {
+  return utcDayStamp(date) >= utcDayStamp(task.end) ? "ready" : "pending";
+}
+
+function calculateScheduleStatus(task: Task, date = new Date()): NonNullable<Task["scheduleStatus"]> {
+  const currentStamp = utcDayStamp(date);
+  const startStamp = utcDayStamp(task.start);
+  const endStamp = utcDayStamp(task.end);
+
+  if (task.progress >= 100) return "completed";
+  if (currentStamp < startStamp) return "notStarted";
+  if (currentStamp > endStamp) return "overdue";
+  return "inProgress";
 }
 
 export function hasInvalidDependencies(tasks: Task[], taskId: string, dependencies: TaskDependency[]) {
@@ -178,14 +201,27 @@ export function checkDependencyConflicts(tasks: Task[]): DependencyConflict[] {
 }
 
 function normalizeTask(task: Task): Task {
+  const type = task.type ?? DEFAULT_TASK_TYPE;
+  const start = new Date(task.start);
+  const end = type === "milestone" ? new Date(start) : new Date(task.end);
+  const milestoneStatus = type === "milestone" ? task.milestoneStatus ?? DEFAULT_MILESTONE_STATUS : undefined;
+  const progress = milestoneStatus === "passed" ? 100 : task.progress;
+
   return {
     ...task,
+    start,
+    end,
     parentId: task.parentId ?? DEFAULT_PARENT_ID,
     dependencies: normalizeDependencies(task.dependencies),
-    type: task.type ?? DEFAULT_TASK_TYPE,
+    type,
+    progress,
+    milestoneStatus,
+    passedAt: milestoneStatus === "passed" ? task.passedAt : undefined,
     isExpanded: task.isExpanded ?? DEFAULT_EXPANDED,
     isCritical: false,
     isLocalCritical: false,
+    scheduleStatus: calculateScheduleStatus({ ...task, start, end, type, progress, milestoneStatus }),
+    isMilestoneOverdue: false,
   };
 }
 
@@ -202,7 +238,7 @@ function resolveActiveProjectId(projects: Project[]) {
     return storedActiveProjectId;
   }
 
-  return projects[0]?.id ?? null;
+  return projects.find((project) => !project.isTemplate)?.id ?? projects[0]?.id ?? null;
 }
 
 function initializeProjectState(): ProjectState {
@@ -485,8 +521,9 @@ export function buildTaskTree(tasks: Task[]): TaskTreeNode[] {
   return roots;
 }
 
-export function flattenTasks(tree: TaskTreeNode[]): TaskRow[] {
+export function flattenTasks(tree: TaskTreeNode[], options?: { respectExpansion?: boolean }): TaskRow[] {
   const result: TaskRow[] = [];
+  const respectExpansion = options?.respectExpansion ?? true;
 
   const walk = (nodes: TaskTreeNode[], level: number) => {
     nodes.forEach((node) => {
@@ -498,7 +535,7 @@ export function flattenTasks(tree: TaskTreeNode[]): TaskRow[] {
       });
 
       const isExpanded = node.task.isExpanded !== false;
-      if (hasChildren && isExpanded) {
+      if (hasChildren && (!respectExpansion || isExpanded)) {
         walk(node.children, level + 1);
       }
     });
@@ -567,6 +604,7 @@ export function useTasks() {
   );
   const tasksWithCriticalPaths = useMemo(() => {
     const childrenMap = buildChildrenMap(criticalPath.tasks);
+    const todayStamp = utcDayStamp(new Date());
     const localScopeIds = selectedSummaryTaskId
       ? new Set<string>([selectedSummaryTaskId, ...collectDescendants(childrenMap, selectedSummaryTaskId)])
       : new Set<string>();
@@ -583,13 +621,20 @@ export function useTasks() {
 
     return criticalPath.tasks.map((task) => {
       const isSummary = childrenMap.has(task.id);
+      const scheduleStatus = calculateScheduleStatus(task);
       const isLocalCritical = isSummary
         ? localScopeIds.has(task.id) && hasLocalCriticalDescendant(task.id)
         : localCriticalPath.criticalTaskIds.has(task.id);
+      const isMilestoneOverdue =
+        (task.type ?? "task") === "milestone" &&
+        task.milestoneStatus !== "passed" &&
+        todayStamp > utcDayStamp(task.end);
 
       return {
         ...task,
+        scheduleStatus,
         isLocalCritical,
+        isMilestoneOverdue,
         dependencies: normalizeDependencies(task.dependencies).map((dependency) => ({
           ...dependency,
           isLocalCritical: localCriticalPath.criticalDependencyKeys.has(`${task.id}-${dependency.taskId}-${dependency.type}`),
@@ -598,6 +643,7 @@ export function useTasks() {
     });
   }, [criticalPath.tasks, localCriticalPath.criticalDependencyKeys, localCriticalPath.criticalTaskIds, selectedSummaryTaskId]);
   const taskTree = useMemo(() => buildTaskTree(tasksWithCriticalPaths), [tasksWithCriticalPaths]);
+  const taskRows = useMemo(() => flattenTasks(taskTree, { respectExpansion: false }), [taskTree]);
   const visibleTasks = useMemo(() => flattenTasks(taskTree), [taskTree]);
 
   const addTask = useCallback((input: TaskInput) => {
@@ -678,8 +724,61 @@ export function useTasks() {
     setActiveProjectTasks(nextTasks.map(normalizeTask));
   }, [setActiveProjectTasks]);
 
+  const toggleMilestonePassed = useCallback((id: string) => {
+    setActiveProjectTasks((prev) =>
+      prev.map((task) => {
+        if (task.id !== id || (task.type ?? "task") !== "milestone") return task;
+
+        if (task.milestoneStatus === "passed") {
+          return normalizeTask({
+            ...task,
+            milestoneStatus: getUnpassedMilestoneStatus(task),
+            passedAt: undefined,
+            progress: 0,
+          });
+        }
+
+        return normalizeTask({
+          ...task,
+          milestoneStatus: "passed",
+          passedAt: new Date().toISOString(),
+          progress: 100,
+        });
+      })
+    );
+  }, [setActiveProjectTasks]);
+
   const createProject = useCallback((name: string) => {
     const project = createStoredProject(name);
+    const nextProjects = getProjects().map(normalizeProject);
+    setProjectState({ projects: nextProjects, activeProjectId: project.id });
+    setSelectedSummaryTaskId(null);
+    return project;
+  }, []);
+
+  const duplicateProject = useCallback((projectId: string) => {
+    const project = duplicateStoredProject(projectId);
+    if (!project) return null;
+
+    const nextProjects = getProjects().map(normalizeProject);
+    setProjectState({ projects: nextProjects, activeProjectId: project.id });
+    setSelectedSummaryTaskId(null);
+    return project;
+  }, []);
+
+  const saveProjectAsTemplate = useCallback((projectId: string) => {
+    const project = saveStoredProjectAsTemplate(projectId);
+    if (!project) return null;
+
+    const nextProjects = getProjects().map(normalizeProject);
+    setProjectState((prev) => ({ projects: nextProjects, activeProjectId: prev.activeProjectId }));
+    return project;
+  }, []);
+
+  const createProjectFromTemplate = useCallback((templateId: string) => {
+    const project = createStoredProjectFromTemplate(templateId);
+    if (!project) return null;
+
     const nextProjects = getProjects().map(normalizeProject);
     setProjectState({ projects: nextProjects, activeProjectId: project.id });
     setSelectedSummaryTaskId(null);
@@ -728,6 +827,7 @@ export function useTasks() {
     activeProject,
     activeProjectId,
     tasks: tasksWithCriticalPaths,
+    taskRows,
     visibleTasks,
     criticalPathProjectEnd: criticalPath.projectEnd,
     criticalPathError: criticalPath.error,
@@ -739,11 +839,15 @@ export function useTasks() {
     moveTask,
     deleteTask,
     createProject,
+    duplicateProject,
+    saveProjectAsTemplate,
+    createProjectFromTemplate,
     selectProject,
     renameProject,
     deleteProject,
     toggleTaskExpanded,
     replaceTasks,
+    toggleMilestonePassed,
     selectSummaryTask,
     clearSelectedSummaryTask,
   };

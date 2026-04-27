@@ -91,6 +91,12 @@ export function TaskFormModal({ isOpen, mode, initialTask, tasks, onClose, onSub
   const [dependencyDrafts, setDependencyDrafts] = useState<DependencyDraft[]>([]);
 
   useEffect(() => {
+    if (taskType === "milestone" && start && end !== start) {
+      setEnd(start);
+    }
+  }, [end, start, taskType]);
+
+  useEffect(() => {
     if (!isOpen) return;
 
     if (initialTask) {
@@ -139,7 +145,8 @@ export function TaskFormModal({ isOpen, mode, initialTask, tasks, onClose, onSub
   const parsedStart = useMemo(() => parseInputDate(start), [start]);
   const parsedEnd = useMemo(() => parseInputDate(end), [end]);
   const trimmedName = name.trim();
-  const isDateRangeInvalid = !!(parsedStart && parsedEnd && parsedStart > parsedEnd);
+  const isMilestone = taskType === "milestone";
+  const isDateRangeInvalid = !isMilestone && !!(parsedStart && parsedEnd && parsedStart > parsedEnd);
   const dependencyOptions = useMemo(
     () => tasks.filter((task) => task.id !== initialTask?.id),
     [tasks, initialTask]
@@ -193,7 +200,7 @@ export function TaskFormModal({ isOpen, mode, initialTask, tasks, onClose, onSub
             onSubmit({
               name: trimmedName,
               start: parsedStart,
-              end: parsedEnd,
+              end: isMilestone ? parsedStart : parsedEnd,
               progress,
               parentId: parentId ? parentId : null,
               type: taskType,
@@ -218,7 +225,12 @@ export function TaskFormModal({ isOpen, mode, initialTask, tasks, onClose, onSub
                 className="task-form-input"
                 type="date"
                 value={start}
-                onChange={(event) => setStart(event.target.value)}
+                onChange={(event) => {
+                  setStart(event.target.value);
+                  if (taskType === "milestone") {
+                    setEnd(event.target.value);
+                  }
+                }}
                 required
                 disabled={isParentWithChildren}
               />
@@ -231,7 +243,7 @@ export function TaskFormModal({ isOpen, mode, initialTask, tasks, onClose, onSub
                 value={end}
                 onChange={(event) => setEnd(event.target.value)}
                 required
-                disabled={isParentWithChildren}
+                disabled={isParentWithChildren || isMilestone}
               />
             </label>
           </div>
@@ -275,7 +287,13 @@ export function TaskFormModal({ isOpen, mode, initialTask, tasks, onClose, onSub
               <select
                 className="task-form-input"
                 value={taskType}
-                onChange={(event) => setTaskType(event.target.value as NonNullable<Task["type"]>)}
+                onChange={(event) => {
+                  const nextType = event.target.value as NonNullable<Task["type"]>;
+                  setTaskType(nextType);
+                  if (nextType === "milestone") {
+                    setEnd(start);
+                  }
+                }}
               >
                 <option value="task">普通任务</option>
                 <option value="milestone">里程碑</option>
@@ -352,6 +370,9 @@ export function TaskFormModal({ isOpen, mode, initialTask, tasks, onClose, onSub
           </div>
           {isParentWithChildren && (
             <p className="task-form-hint">父任务的起止时间由子任务自动汇总。</p>
+          )}
+          {isMilestone && (
+            <p className="task-form-hint">里程碑为 0 工期节点，结束时间会自动同步为开始时间。</p>
           )}
           {isDateRangeInvalid && <p className="task-form-error">结束时间不能早于开始时间。</p>}
           {dependencyError && <p className="task-form-error">{dependencyError}</p>}

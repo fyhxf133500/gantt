@@ -24,6 +24,7 @@ type PendingConflictState = {
 export function Home() {
   const {
     tasks,
+    taskRows,
     visibleTasks,
     criticalPathError,
     selectedSummaryTaskId,
@@ -32,12 +33,16 @@ export function Home() {
     activeProject,
     activeProjectId,
     createProject,
+    duplicateProject,
+    saveProjectAsTemplate,
+    createProjectFromTemplate,
     selectProject,
     renameProject,
     deleteProject: deleteProjectRecord,
     moveTask,
     deleteTask,
     toggleTaskExpanded,
+    toggleMilestonePassed,
     replaceTasks,
     selectSummaryTask,
     clearSelectedSummaryTask,
@@ -153,6 +158,9 @@ export function Home() {
       activeProjectId={activeProjectId}
       onSelectProject={selectProject}
       onCreateProject={createProject}
+      onDuplicateProject={duplicateProject}
+      onSaveProjectAsTemplate={saveProjectAsTemplate}
+      onCreateProjectFromTemplate={createProjectFromTemplate}
       onRenameProject={renameProject}
       onDeleteProject={deleteProjectRecord}
     >
@@ -165,7 +173,9 @@ export function Home() {
         }}
       >
         <GanttChart
+          projectId={activeProjectId}
           tasks={visibleTasks}
+          allTasks={taskRows}
           criticalPathError={criticalPathError}
           selectedSummaryTaskId={selectedSummaryTaskId}
           localCriticalPathError={localCriticalPathError}
@@ -175,6 +185,7 @@ export function Home() {
           onUpdateTask={handleUpdateTask}
           onToggleExpand={toggleTaskExpanded}
           onMoveTask={moveTask}
+          onToggleMilestonePassed={toggleMilestonePassed}
           onSelectSummaryTask={selectSummaryTask}
           onClearSelectedSummaryTask={clearSelectedSummaryTask}
         />

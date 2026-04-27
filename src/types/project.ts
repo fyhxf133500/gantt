@@ -4,6 +4,7 @@ export interface Project {
   id: string;
   name: string;
   tasks: Task[];
+  isTemplate?: boolean;
   createdAt?: string;
   updatedAt?: string;
 }

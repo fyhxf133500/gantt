@@ -6,7 +6,9 @@ import type { Task, TaskDependency } from "../types/task";
 import { GanttToolbar } from "./GanttToolbar";
 
 export type GanttChartProps = {
+  projectId: string | null;
   tasks: TaskRow[];
+  allTasks: TaskRow[];
   criticalPathError?: string | null;
   selectedSummaryTaskId: string | null;
   localCriticalPathError?: string | null;
@@ -16,6 +18,7 @@ export type GanttChartProps = {
   onUpdateTask: (id: string, input: TaskUpdateInput) => boolean;
   onToggleExpand: (id: string) => void;
   onMoveTask: (id: string, parentId: string | null, options?: MoveTaskOptions) => void;
+  onToggleMilestonePassed: (id: string) => void;
   onSelectSummaryTask: (id: string) => void;
   onClearSelectedSummaryTask: () => void;
 };
@@ -31,6 +34,8 @@ type MoveTaskOptions = {
   referenceId?: string | null;
   placement?: "before" | "after";
 };
+
+type TaskFilterValue = "all" | "task" | "milestone" | "summary" | "globalCritical" | "localCritical";
 
 type TaskListHeaderProps = {
   headerHeight: number;
@@ -57,6 +62,7 @@ type TaskListTableContentProps = TaskListTableBaseProps & {
   onDeleteTask: (task: Task) => void;
   onToggleExpand: (id: string) => void;
   onMoveTask: (id: string, parentId: string | null, options?: MoveTaskOptions) => void;
+  onToggleMilestonePassed: (id: string) => void;
   selectedSummaryTaskId: string | null;
   onSelectSummaryTask: (id: string) => void;
 };
@@ -100,9 +106,9 @@ type MilestoneOverlay = {
   isLocalCritical: boolean;
 };
 
-const HEADER_HEIGHT = 50;
+const HEADER_HEIGHT = 64;
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
-const HEADER_COLUMNS = ["任务名称", "开始时间", "结束时间", "操作"];
+const HEADER_COLUMNS = ["任务名称", "开始时间", "结束时间", "状态", "操作"];
 const TASK_LIST_COLUMN_WIDTH = 155;
 const TASK_LIST_WIDTH = HEADER_COLUMNS.length * TASK_LIST_COLUMN_WIDTH;
 const TIMELINE_RIGHT_SAFE_WIDTH = 24;
@@ -110,6 +116,8 @@ const DAY_COLUMN_WIDTH = 50;
 const WEEK_COLUMN_WIDTH = 92;
 const MONTH_COLUMN_WIDTH = 112;
 const DAY_HEADER_WEEKDAY_MIN_WIDTH = 46;
+const DAY_HEADER_FULL_Y = 48;
+const DAY_HEADER_COMPACT_Y = 52;
 const DAY_PRE_STEPS = 2;
 const WEEK_PRE_STEPS = 1;
 const MONTH_PRE_STEPS = 1;
@@ -123,12 +131,53 @@ const DATE_FORMAT_OPTIONS: Intl.DateTimeFormatOptions = {
   month: "2-digit",
   day: "2-digit",
 };
+const TASK_FILTER_OPTIONS: Array<{ value: TaskFilterValue; label: string; requiresLocalSummary?: boolean }> = [
+  { value: "all", label: "全部任务" },
+  { value: "task", label: "普通任务" },
+  { value: "milestone", label: "里程碑" },
+  { value: "summary", label: "父任务" },
+  { value: "globalCritical", label: "全局关键任务" },
+  { value: "localCritical", label: "局部关键任务", requiresLocalSummary: true },
+];
 
 function formatDateYMD(date: Date) {
   const year = date.getFullYear();
   const month = String(date.getMonth() + 1).padStart(2, "0");
   const day = String(date.getDate()).padStart(2, "0");
   return `${year}-${month}-${day}`;
+}
+
+type TaskDisplayStatus = {
+  label: string;
+  variant: "none" | "notStarted" | "inProgress" | "completed" | "pending" | "ready" | "overdue" | "passed";
+  actionLabel?: string;
+};
+
+const SCHEDULE_STATUS_LABELS: Record<NonNullable<Task["scheduleStatus"]>, string> = {
+  notStarted: "未开始",
+  inProgress: "进行中",
+  completed: "已完成",
+  overdue: "已延期",
+  atRisk: "有风险",
+};
+
+function getTaskDisplayStatus(task: Task): TaskDisplayStatus {
+  if ((task.type ?? "task") !== "milestone") {
+    const status = task.scheduleStatus ?? "notStarted";
+    return {
+      label: SCHEDULE_STATUS_LABELS[status],
+      variant: status === "atRisk" ? "inProgress" : status,
+    };
+  }
+
+  if (task.milestoneStatus === "passed") {
+    return { label: "已通过", variant: "passed", actionLabel: "撤销通过" };
+  }
+
+  const isReady = task.milestoneStatus === "ready" || utcDayStamp(new Date()) >= utcDayStamp(task.end);
+  return isReady
+    ? { label: "待确认", variant: "ready", actionLabel: "确认通过" }
+    : { label: "未确认", variant: "pending", actionLabel: "确认通过" };
 }
 
 function getDurationDays(start: Date, end: Date) {
@@ -300,6 +349,7 @@ function TaskListTableContent({
   onDeleteTask,
   onToggleExpand,
   onMoveTask,
+  onToggleMilestonePassed,
   selectedSummaryTaskId,
   onSelectSummaryTask,
 }: TaskListTableContentProps) {
@@ -376,6 +426,9 @@ function TaskListTableContent({
           maxWidth: rowWidth,
         };
         const displayTask = originalTask ?? task;
+        const displayStatus = originalTask
+          ? getTaskDisplayStatus(originalTask)
+          : ({ label: "—", variant: "none" } satisfies TaskDisplayStatus);
         const nameIndentStyle: CSSProperties = {
           paddingLeft: `${level * 16}px`,
         };
@@ -481,6 +534,25 @@ function TaskListTableContent({
               {dateFormatter.format(displayTask.end)}
             </div>
             <div className="task-list-cell" style={cellStyle}>
+              <div className="milestone-status-cell">
+                <span className={`milestone-status-badge milestone-status-badge--${displayStatus.variant}`}>
+                  {displayStatus.label}
+                </span>
+                {displayStatus.actionLabel && originalTask && (
+                  <button
+                    type="button"
+                    className="task-action-button task-action-button--compact"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      onToggleMilestonePassed(originalTask.id);
+                    }}
+                  >
+                    {displayStatus.actionLabel}
+                  </button>
+                )}
+              </div>
+            </div>
+            <div className="task-list-cell" style={cellStyle}>
               <div className="task-list-actions">
                 <button
                   type="button"
@@ -548,7 +620,8 @@ function TooltipContent({ task, fontSize, fontFamily }: TooltipContentProps) {
     fontSize,
     color: "#0f172a",
   };
-  const durationDays = getDurationDays(task.start, task.end);
+  const isMilestone = task.type === "milestone";
+  const durationDays = isMilestone ? 0 : getDurationDays(task.start, task.end);
   const containerStyle: CSSProperties = {
     fontFamily,
     padding: "12px 14px",
@@ -638,7 +711,7 @@ function replaceTextWithTspan(text: SVGTextElement, weekday: string, day: string
   text.textContent = "";
   text.dataset.ganttDayHeader = marker;
   text.setAttribute("text-anchor", "middle");
-  text.setAttribute("y", showWeekday ? "33" : "40");
+  text.setAttribute("y", String(showWeekday ? DAY_HEADER_FULL_Y : DAY_HEADER_COMPACT_Y));
 
   if (!showWeekday) {
     const dayOnly = document.createElementNS("http://www.w3.org/2000/svg", "tspan");
@@ -747,6 +820,110 @@ function getLatestEnd(tasks: TaskRow[]) {
   return tasks.reduce<Date>((latest, task) => (task.end > latest ? task.end : latest), tasks[0].end);
 }
 
+function buildTaskRowMap(tasks: TaskRow[]) {
+  return new Map(tasks.map((task) => [task.id, task]));
+}
+
+function buildTaskRowChildrenMap(tasks: TaskRow[]) {
+  const map = new Map<string, string[]>();
+  tasks.forEach((task) => {
+    if (!task.parentId) return;
+    const children = map.get(task.parentId) ?? [];
+    children.push(task.id);
+    map.set(task.parentId, children);
+  });
+  return map;
+}
+
+function addAncestors(task: TaskRow, taskById: Map<string, TaskRow>, includedIds: Set<string>) {
+  let currentParentId = task.parentId ?? null;
+  const visited = new Set<string>();
+
+  while (currentParentId && !visited.has(currentParentId)) {
+    visited.add(currentParentId);
+    includedIds.add(currentParentId);
+    currentParentId = taskById.get(currentParentId)?.parentId ?? null;
+  }
+}
+
+function addDescendants(taskId: string, childrenMap: Map<string, string[]>, includedIds: Set<string>) {
+  const stack = [...(childrenMap.get(taskId) ?? [])];
+
+  while (stack.length > 0) {
+    const current = stack.pop();
+    if (!current || includedIds.has(current)) continue;
+    includedIds.add(current);
+    stack.push(...(childrenMap.get(current) ?? []));
+  }
+}
+
+function hasCollapsedIncludedAncestor(
+  task: TaskRow,
+  taskById: Map<string, TaskRow>,
+  includedIds: Set<string>
+) {
+  let currentParentId = task.parentId ?? null;
+  const visited = new Set<string>();
+
+  while (currentParentId && !visited.has(currentParentId)) {
+    visited.add(currentParentId);
+    const parent = taskById.get(currentParentId);
+    if (!parent) return false;
+    if (includedIds.has(parent.id) && parent.isExpanded === false) {
+      return true;
+    }
+    currentParentId = parent.parentId ?? null;
+  }
+
+  return false;
+}
+
+function matchesTaskFilter(task: TaskRow, filter: TaskFilterValue) {
+  const type = task.type ?? "task";
+
+  if (filter === "all") return true;
+  if (filter === "task") return type === "task" && !task.hasChildren;
+  if (filter === "milestone") return type === "milestone";
+  if (filter === "summary") return task.hasChildren;
+  if (filter === "globalCritical") return Boolean(task.isCritical);
+  return Boolean(task.isLocalCritical);
+}
+
+function filterTaskRows(
+  visibleTasks: TaskRow[],
+  allTasks: TaskRow[],
+  searchValue: string,
+  filterValue: TaskFilterValue
+) {
+  const query = searchValue.trim().toLowerCase();
+  const hasActiveFilter = query.length > 0 || filterValue !== "all";
+
+  if (!hasActiveFilter) {
+    return { tasks: visibleTasks, isFiltering: false };
+  }
+
+  const taskById = buildTaskRowMap(allTasks);
+  const childrenMap = buildTaskRowChildrenMap(allTasks);
+  const includedIds = new Set<string>();
+
+  allTasks.forEach((task) => {
+    const matchesSearch = query.length === 0 || task.name.toLowerCase().includes(query);
+    if (!matchesSearch || !matchesTaskFilter(task, filterValue)) return;
+
+    includedIds.add(task.id);
+    addAncestors(task, taskById, includedIds);
+    if (task.hasChildren) {
+      addDescendants(task.id, childrenMap, includedIds);
+    }
+  });
+
+  const filteredTasks = allTasks.filter(
+    (task) => includedIds.has(task.id) && !hasCollapsedIncludedAncestor(task, taskById, includedIds)
+  );
+
+  return { tasks: filteredTasks, isFiltering: true };
+}
+
 function getViewDate(earliestStart: Date | null, mode: ViewMode) {
   if (!earliestStart) return undefined;
   const offset = mode === ViewMode.Month ? 0 : mode === ViewMode.Week ? 1 : 2;
@@ -754,7 +931,9 @@ function getViewDate(earliestStart: Date | null, mode: ViewMode) {
 }
 
 export function GanttChart({
+  projectId,
   tasks,
+  allTasks,
   criticalPathError,
   selectedSummaryTaskId,
   localCriticalPathError,
@@ -764,16 +943,35 @@ export function GanttChart({
   onUpdateTask,
   onToggleExpand,
   onMoveTask,
+  onToggleMilestonePassed,
   onSelectSummaryTask,
   onClearSelectedSummaryTask,
 }: GanttChartProps) {
   const [viewMode, setViewMode] = useState<ViewMode>(ViewMode.Day);
   const [showCriticalPath, setShowCriticalPath] = useState(true);
+  const [taskSearch, setTaskSearch] = useState("");
+  const [taskFilter, setTaskFilter] = useState<TaskFilterValue>("all");
   const [dependencyOverlay, setDependencyOverlay] = useState<DependencyOverlayLayout | null>(null);
   const [ganttWidth, setGanttWidth] = useState(0);
   const ganttContainerRef = useRef<HTMLDivElement | null>(null);
   const horizontalScrollRef = useRef<HTMLDivElement | null>(null);
   const viewConfig = useMemo(() => getViewConfig(viewMode), [viewMode]);
+  const filteredTaskResult = useMemo(
+    () => filterTaskRows(tasks, allTasks, taskSearch, taskFilter),
+    [allTasks, taskFilter, taskSearch, tasks]
+  );
+  const displayTasks = filteredTaskResult.tasks;
+  const isFilteringTasks = filteredTaskResult.isFiltering;
+  const availableFilterOptions = useMemo(
+    () => TASK_FILTER_OPTIONS.filter((option) => !option.requiresLocalSummary || Boolean(selectedSummaryTaskId)),
+    [selectedSummaryTaskId]
+  );
+
+  useEffect(() => {
+    if (taskFilter === "localCritical" && !selectedSummaryTaskId) {
+      setTaskFilter("all");
+    }
+  }, [selectedSummaryTaskId, taskFilter]);
 
   useEffect(() => {
     const root = ganttContainerRef.current;
@@ -790,10 +988,10 @@ export function GanttChart({
     return () => {
       resizeObserver.disconnect();
     };
-  }, [tasks.length]);
+  }, [displayTasks.length]);
 
   const ganttTasks = useMemo<GanttTask[]>(() => {
-    const mappedTasks = tasks.map((task) => {
+    const mappedTasks = displayTasks.map((task) => {
       const isSummary = task.hasChildren;
       const isMilestone = (task.type ?? "task") === "milestone";
       const isCritical = showCriticalPath && task.isCritical && !isSummary;
@@ -805,7 +1003,7 @@ export function GanttChart({
         start: task.start,
         end: task.end,
         progress: task.progress,
-        type: (isSummary ? "project" : isMilestone ? "task" : task.type ?? "task") as GanttTask["type"],
+        type: (isSummary ? "project" : task.type ?? "task") as GanttTask["type"],
         isDisabled: isSummary,
         styles: isSummary
           ? isCriticalSummary
@@ -841,10 +1039,10 @@ export function GanttChart({
       };
     });
 
-    const earliestStart = tasks.length > 0
-      ? tasks.reduce<Date>((earliest, task) => (task.start < earliest ? task.start : earliest), tasks[0].start)
+    const earliestStart = displayTasks.length > 0
+      ? displayTasks.reduce<Date>((earliest, task) => (task.start < earliest ? task.start : earliest), displayTasks[0].start)
       : null;
-    const latestEnd = getLatestEnd(tasks);
+    const latestEnd = getLatestEnd(displayTasks);
     const visibleTimelineWidth = Math.max(0, ganttWidth - TASK_LIST_WIDTH);
 
     if (!earliestStart || !latestEnd || visibleTimelineWidth <= 0) {
@@ -882,9 +1080,9 @@ export function GanttChart({
         },
       },
     ];
-  }, [ganttWidth, tasks, showCriticalPath, viewConfig.columnWidth, viewConfig.preStepsCount, viewMode]);
+  }, [displayTasks, ganttWidth, showCriticalPath, viewConfig.columnWidth, viewConfig.preStepsCount, viewMode]);
 
-  const taskById = useMemo(() => new Map(tasks.map((task) => [task.id, task])), [tasks]);
+  const taskById = useMemo(() => new Map(displayTasks.map((task) => [task.id, task])), [displayTasks]);
 
   const Tooltip = useMemo(() => {
     const WrappedTooltip: FC<TooltipContentProps> = (props) => {
@@ -899,6 +1097,7 @@ export function GanttChart({
             start: originalTask.start,
             end: originalTask.end,
             progress: originalTask.progress,
+            type: originalTask.hasChildren ? "project" : (originalTask.type ?? "task"),
           }}
         />
       );
@@ -930,7 +1129,7 @@ export function GanttChart({
       const barElements = Array.from(chartSvg.querySelectorAll<SVGGElement>("g[tabindex='0']"));
       const barRectById = new Map<string, OverlayRect>();
 
-      tasks.forEach((task, index) => {
+      displayTasks.forEach((task, index) => {
         const element = barElements[index];
         if (!element) return;
         const rect = element.getBoundingClientRect();
@@ -947,7 +1146,7 @@ export function GanttChart({
       });
 
       const paths: DependencyPath[] = [];
-      tasks.forEach((task) => {
+      displayTasks.forEach((task) => {
         (task.dependencies ?? []).forEach((dependency, dependencyIndex) => {
           const predecessorRect = barRectById.get(dependency.taskId);
           const currentRect = barRectById.get(task.id);
@@ -972,7 +1171,7 @@ export function GanttChart({
       });
 
       const localCriticalRects = showCriticalPath
-        ? tasks.flatMap((task) => {
+        ? displayTasks.flatMap((task) => {
             if (!task.isLocalCritical) return [];
             if ((task.type ?? "task") === "milestone") return [];
             const rect = barRectById.get(task.id);
@@ -980,7 +1179,7 @@ export function GanttChart({
           })
         : [];
 
-      const milestones = tasks.flatMap<MilestoneOverlay>((task) => {
+      const milestones = displayTasks.flatMap<MilestoneOverlay>((task) => {
         if ((task.type ?? "task") !== "milestone") return [];
         const rect = barRectById.get(task.id);
         if (!rect) return [];
@@ -1048,12 +1247,12 @@ export function GanttChart({
       root.removeEventListener("scroll", handleScroll, true);
       window.removeEventListener("resize", handleScroll);
     };
-  }, [tasks, taskById, viewMode, showCriticalPath]);
+  }, [displayTasks, taskById, viewMode, showCriticalPath]);
 
   const earliestStart = useMemo(() => {
-    if (tasks.length === 0) return null;
-    return tasks.reduce<Date>((earliest, task) => (task.start < earliest ? task.start : earliest), tasks[0].start);
-  }, [tasks]);
+    if (displayTasks.length === 0) return null;
+    return displayTasks.reduce<Date>((earliest, task) => (task.start < earliest ? task.start : earliest), displayTasks[0].start);
+  }, [displayTasks]);
 
   const viewDate = useMemo(() => getViewDate(earliestStart, viewMode), [earliestStart, viewMode]);
 
@@ -1096,7 +1295,7 @@ export function GanttChart({
       timeoutIds.forEach((timeoutId) => window.clearTimeout(timeoutId));
       mutationObserver.disconnect();
     };
-  }, [tasks, viewMode, viewConfig.columnWidth]);
+  }, [displayTasks, viewMode, viewConfig.columnWidth]);
 
   const TaskListTable = useMemo(() => {
     const Table: FC<TaskListTableBaseProps> = (props) => (
@@ -1107,22 +1306,35 @@ export function GanttChart({
         onDeleteTask={onDeleteTask}
         onToggleExpand={onToggleExpand}
         onMoveTask={onMoveTask}
+        onToggleMilestonePassed={onToggleMilestonePassed}
         selectedSummaryTaskId={selectedSummaryTaskId}
         onSelectSummaryTask={onSelectSummaryTask}
       />
     );
     return Table;
-  }, [taskById, onEditTask, onDeleteTask, onToggleExpand, onMoveTask, selectedSummaryTaskId, onSelectSummaryTask]);
+  }, [
+    taskById,
+    onEditTask,
+    onDeleteTask,
+    onToggleExpand,
+    onMoveTask,
+    onToggleMilestonePassed,
+    selectedSummaryTaskId,
+    onSelectSummaryTask,
+  ]);
 
   const handleDateChange = (updatedTask: GanttTask) => {
     const originalTask = taskById.get(updatedTask.id);
     if (!originalTask) return false;
     if (originalTask.hasChildren) return false;
+    const isMilestone = (originalTask.type ?? "task") === "milestone";
+    const nextStart = updatedTask.start;
+    const nextEnd = isMilestone ? updatedTask.start : updatedTask.end;
 
     return onUpdateTask(originalTask.id, {
       name: originalTask.name,
-      start: updatedTask.start,
-      end: updatedTask.end,
+      start: nextStart,
+      end: nextEnd,
       progress: originalTask.progress,
     });
   };
@@ -1201,6 +1413,28 @@ export function GanttChart({
   return (
     <div className="gantt-wrapper">
       <div className="gantt-toolbar">
+        <div className="gantt-toolbar-filters">
+          <input
+            type="search"
+            className="task-search-input"
+            placeholder="搜索任务"
+            value={taskSearch}
+            onChange={(event) => setTaskSearch(event.target.value)}
+            aria-label="搜索任务"
+          />
+          <select
+            className="task-filter-select"
+            value={taskFilter}
+            onChange={(event) => setTaskFilter(event.target.value as TaskFilterValue)}
+            aria-label="筛选任务"
+          >
+            {availableFilterOptions.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </div>
         <div className="gantt-toolbar-controls">
           <GanttToolbar viewMode={viewMode} onChange={setViewMode} />
           <div className="gantt-toolbar-actions">
@@ -1228,9 +1462,9 @@ export function GanttChart({
           {localCriticalPathError}
         </div>
       )}
-      {tasks.length === 0 ? (
+      {displayTasks.length === 0 ? (
         <div className="gantt-empty">
-          暂无任务
+          {isFilteringTasks ? "没有匹配的任务" : "暂无任务"}
         </div>
       ) : (
         <div
@@ -1240,6 +1474,7 @@ export function GanttChart({
           ref={ganttContainerRef}
         >
           <Gantt
+            key={projectId ?? "no-active-project"}
             tasks={ganttTasks}
             viewMode={viewMode}
             viewDate={viewDate}
