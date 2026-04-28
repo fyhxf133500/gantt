@@ -25,5 +25,7 @@ export interface Task {
   isCritical?: boolean;
   isLocalCritical?: boolean;
   scheduleStatus?: ScheduleStatus;
+  dependencyBlocked?: boolean;
+  dependencyViolation?: boolean;
   isMilestoneOverdue?: boolean;
 }

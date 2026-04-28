@@ -103,9 +103,44 @@ function calculateScheduleStatus(task: Task, date = new Date()): NonNullable<Tas
   const endStamp = utcDayStamp(task.end);
 
   if (task.progress >= 100) return "completed";
-  if (currentStamp < startStamp) return "notStarted";
   if (currentStamp > endStamp) return "overdue";
+  if (task.progress > 0) return "inProgress";
+  if (currentStamp < startStamp) return "notStarted";
   return "inProgress";
+}
+
+function getDependencyStatus(
+  task: Task,
+  taskMap: Map<string, Task>
+): Pick<Task, "dependencyBlocked" | "dependencyViolation"> {
+  let dependencyBlocked = false;
+  let dependencyViolation = false;
+
+  normalizeDependencies(task.dependencies).forEach((dependency) => {
+    const predecessor = taskMap.get(dependency.taskId);
+    if (!predecessor) return;
+
+    if (dependency.type === "FS" && predecessor.progress < 100 && task.progress > 0) {
+      dependencyBlocked = true;
+      dependencyViolation = true;
+    }
+
+    if (dependency.type === "SS" && predecessor.progress <= 0 && task.progress > 0) {
+      dependencyViolation = true;
+    }
+
+    if (dependency.type === "FF" && predecessor.progress < 100 && task.progress >= 100) {
+      dependencyViolation = true;
+    }
+  });
+
+  return { dependencyBlocked, dependencyViolation };
+}
+
+function hasUnmetDependenciesForMilestone(tasks: Task[], milestone: Task) {
+  const taskMap = new Map(tasks.map((task) => [task.id, task]));
+  const candidate = { ...milestone, progress: 100 };
+  return getDependencyStatus(candidate, taskMap).dependencyViolation === true;
 }
 
 export function hasInvalidDependencies(tasks: Task[], taskId: string, dependencies: TaskDependency[]) {
@@ -221,6 +256,8 @@ function normalizeTask(task: Task): Task {
     isCritical: false,
     isLocalCritical: false,
     scheduleStatus: calculateScheduleStatus({ ...task, start, end, type, progress, milestoneStatus }),
+    dependencyBlocked: false,
+    dependencyViolation: false,
     isMilestoneOverdue: false,
   };
 }
@@ -604,6 +641,7 @@ export function useTasks() {
   );
   const tasksWithCriticalPaths = useMemo(() => {
     const childrenMap = buildChildrenMap(criticalPath.tasks);
+    const taskMap = new Map(criticalPath.tasks.map((task) => [task.id, task]));
     const todayStamp = utcDayStamp(new Date());
     const localScopeIds = selectedSummaryTaskId
       ? new Set<string>([selectedSummaryTaskId, ...collectDescendants(childrenMap, selectedSummaryTaskId)])
@@ -629,10 +667,12 @@ export function useTasks() {
         (task.type ?? "task") === "milestone" &&
         task.milestoneStatus !== "passed" &&
         todayStamp > utcDayStamp(task.end);
+      const dependencyStatus = getDependencyStatus(task, taskMap);
 
       return {
         ...task,
         scheduleStatus,
+        ...dependencyStatus,
         isLocalCritical,
         isMilestoneOverdue,
         dependencies: normalizeDependencies(task.dependencies).map((dependency) => ({
@@ -724,7 +764,7 @@ export function useTasks() {
     setActiveProjectTasks(nextTasks.map(normalizeTask));
   }, [setActiveProjectTasks]);
 
-  const toggleMilestonePassed = useCallback((id: string) => {
+  const toggleMilestonePassed = useCallback((id: string, options?: { force?: boolean }) => {
     setActiveProjectTasks((prev) =>
       prev.map((task) => {
         if (task.id !== id || (task.type ?? "task") !== "milestone") return task;
@@ -736,6 +776,10 @@ export function useTasks() {
             passedAt: undefined,
             progress: 0,
           });
+        }
+
+        if (!options?.force && hasUnmetDependenciesForMilestone(prev, task)) {
+          return task;
         }
 
         return normalizeTask({

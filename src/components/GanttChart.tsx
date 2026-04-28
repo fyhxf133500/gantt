@@ -18,7 +18,7 @@ export type GanttChartProps = {
   onUpdateTask: (id: string, input: TaskUpdateInput) => boolean;
   onToggleExpand: (id: string) => void;
   onMoveTask: (id: string, parentId: string | null, options?: MoveTaskOptions) => void;
-  onToggleMilestonePassed: (id: string) => void;
+  onToggleMilestonePassed: (id: string, options?: { force?: boolean }) => void;
   onSelectSummaryTask: (id: string) => void;
   onClearSelectedSummaryTask: () => void;
 };
@@ -35,7 +35,16 @@ type MoveTaskOptions = {
   placement?: "before" | "after";
 };
 
-type TaskFilterValue = "all" | "task" | "milestone" | "summary" | "globalCritical" | "localCritical";
+type TaskFilterValue =
+  | "all"
+  | "task"
+  | "milestone"
+  | "summary"
+  | "completed"
+  | "overdue"
+  | "readyMilestone"
+  | "globalCritical"
+  | "localCritical";
 
 type TaskListHeaderProps = {
   headerHeight: number;
@@ -58,11 +67,12 @@ type TaskListTableBaseProps = {
 
 type TaskListTableContentProps = TaskListTableBaseProps & {
   taskById: Map<string, TaskRow>;
+  dependencyTaskById: Map<string, TaskRow>;
   onEditTask: (task: Task) => void;
   onDeleteTask: (task: Task) => void;
   onToggleExpand: (id: string) => void;
   onMoveTask: (id: string, parentId: string | null, options?: MoveTaskOptions) => void;
-  onToggleMilestonePassed: (id: string) => void;
+  onToggleMilestonePassed: (id: string, options?: { force?: boolean }) => void;
   selectedSummaryTaskId: string | null;
   onSelectSummaryTask: (id: string) => void;
 };
@@ -106,6 +116,40 @@ type MilestoneOverlay = {
   isLocalCritical: boolean;
 };
 
+type ProjectHealthStats = {
+  totalTasks: number;
+  inProgress: number;
+  completed: number;
+  overdue: number;
+  readyMilestones: number;
+  passedMilestones: number;
+  globalCritical: number;
+};
+
+type DependencyIssue = {
+  key: string;
+  predecessorName: string;
+  dependencyType: TaskDependency["type"];
+  description: string;
+};
+
+type DependencyPopoverState = {
+  taskId: string;
+  left: number;
+  top: number;
+};
+
+type StatusHelpPopoverState = {
+  taskId: string;
+  left: number;
+  top: number;
+};
+
+type PendingMilestonePass = {
+  task: TaskRow;
+  issues: DependencyIssue[];
+};
+
 const HEADER_HEIGHT = 64;
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 const HEADER_COLUMNS = ["任务名称", "开始时间", "结束时间", "状态", "操作"];
@@ -136,6 +180,9 @@ const TASK_FILTER_OPTIONS: Array<{ value: TaskFilterValue; label: string; requir
   { value: "task", label: "普通任务" },
   { value: "milestone", label: "里程碑" },
   { value: "summary", label: "父任务" },
+  { value: "completed", label: "已完成任务" },
+  { value: "overdue", label: "已延期任务" },
+  { value: "readyMilestone", label: "待确认节点" },
   { value: "globalCritical", label: "全局关键任务" },
   { value: "localCritical", label: "局部关键任务", requiresLocalSummary: true },
 ];
@@ -171,13 +218,117 @@ function getTaskDisplayStatus(task: Task): TaskDisplayStatus {
   }
 
   if (task.milestoneStatus === "passed") {
-    return { label: "已通过", variant: "passed", actionLabel: "撤销通过" };
+    return {
+      label: "已通过",
+      variant: "passed",
+      actionLabel: "撤销通过",
+    };
   }
 
   const isReady = task.milestoneStatus === "ready" || utcDayStamp(new Date()) >= utcDayStamp(task.end);
-  return isReady
-    ? { label: "待确认", variant: "ready", actionLabel: "确认通过" }
-    : { label: "未确认", variant: "pending", actionLabel: "确认通过" };
+  return {
+    label: isReady ? "待确认" : "未开始",
+    variant: isReady ? "ready" : "notStarted",
+    actionLabel: "确认通过",
+  };
+}
+
+function getDependencyIssues(
+  task: Task,
+  taskById: Map<string, TaskRow>,
+  options?: { assumeProgress?: number }
+): DependencyIssue[] {
+  const taskProgress = options?.assumeProgress ?? task.progress;
+  const shouldEvaluate = options?.assumeProgress !== undefined || task.dependencyViolation;
+  if (!shouldEvaluate) return [];
+
+  return (task.dependencies ?? []).flatMap<DependencyIssue>((dependency, index) => {
+    const predecessor = taskById.get(dependency.taskId);
+    if (!predecessor) return [];
+
+    if (dependency.type === "FS" && predecessor.progress < 100 && taskProgress > 0) {
+      return [
+        {
+          key: `${task.id}-${dependency.taskId}-${dependency.type}-${index}`,
+          predecessorName: predecessor.name,
+          dependencyType: dependency.type,
+          description: `前置任务尚未完成，但当前任务已经${taskProgress >= 100 ? "完成" : "开始"}`,
+        },
+      ];
+    }
+
+    if (dependency.type === "SS" && predecessor.progress <= 0 && taskProgress > 0) {
+      return [
+        {
+          key: `${task.id}-${dependency.taskId}-${dependency.type}-${index}`,
+          predecessorName: predecessor.name,
+          dependencyType: dependency.type,
+          description: "前置任务尚未开始，但当前任务已经开始",
+        },
+      ];
+    }
+
+    if (dependency.type === "FF" && predecessor.progress < 100 && taskProgress >= 100) {
+      return [
+        {
+          key: `${task.id}-${dependency.taskId}-${dependency.type}-${index}`,
+          predecessorName: predecessor.name,
+          dependencyType: dependency.type,
+          description: "前置任务尚未完成，但当前任务已经完成",
+        },
+      ];
+    }
+
+    return [];
+  });
+}
+
+function isMilestoneAwaitingConfirmation(task: Task) {
+  if ((task.type ?? "task") !== "milestone") return false;
+  if (task.milestoneStatus === "passed") return false;
+  return task.milestoneStatus === "ready" || utcDayStamp(new Date()) >= utcDayStamp(task.end);
+}
+
+function isCountableTask(task: TaskRow) {
+  return !task.hasChildren && (task.type ?? "task") === "task";
+}
+
+function isCountableMilestone(task: TaskRow) {
+  return !task.hasChildren && (task.type ?? "task") === "milestone";
+}
+
+function calculateProjectHealthStats(tasks: TaskRow[]): ProjectHealthStats {
+  return tasks.reduce<ProjectHealthStats>(
+    (stats, task) => {
+      if (isCountableTask(task)) {
+        stats.totalTasks += 1;
+        if (task.scheduleStatus === "inProgress") stats.inProgress += 1;
+        if (task.scheduleStatus === "completed") stats.completed += 1;
+        if (task.scheduleStatus === "overdue") stats.overdue += 1;
+      }
+
+      if (isCountableMilestone(task)) {
+        stats.totalTasks += 1;
+        if (isMilestoneAwaitingConfirmation(task)) stats.readyMilestones += 1;
+        if (task.milestoneStatus === "passed") stats.passedMilestones += 1;
+      }
+
+      if (!task.hasChildren && task.isCritical) {
+        stats.globalCritical += 1;
+      }
+
+      return stats;
+    },
+    {
+      totalTasks: 0,
+      inProgress: 0,
+      completed: 0,
+      overdue: 0,
+      readyMilestones: 0,
+      passedMilestones: 0,
+      globalCritical: 0,
+    }
+  );
 }
 
 function getDurationDays(start: Date, end: Date) {
@@ -335,6 +486,62 @@ function TaskListHeader({ headerHeight, rowWidth, fontFamily, fontSize }: TaskLi
   );
 }
 
+function ProjectHealthBar({
+  stats,
+  onFilterChange,
+}: {
+  stats: ProjectHealthStats;
+  onFilterChange: (filter: TaskFilterValue) => void;
+}) {
+  const items: Array<{
+    key: string;
+    label: string;
+    value: number;
+    variant?: "neutral" | "blue" | "green" | "red" | "amber" | "critical";
+    filter?: TaskFilterValue;
+  }> = [
+    { key: "total", label: "总任务", value: stats.totalTasks, variant: "neutral" },
+    { key: "inProgress", label: "进行中", value: stats.inProgress, variant: "blue" },
+    { key: "completed", label: "已完成", value: stats.completed, variant: "green", filter: "completed" },
+    { key: "overdue", label: "已延期", value: stats.overdue, variant: "red", filter: "overdue" },
+    { key: "readyMilestones", label: "待确认节点", value: stats.readyMilestones, variant: "amber", filter: "readyMilestone" },
+    { key: "passedMilestones", label: "已通过节点", value: stats.passedMilestones, variant: "green" },
+    { key: "globalCritical", label: "全局关键", value: stats.globalCritical, variant: "critical", filter: "globalCritical" },
+  ];
+
+  return (
+    <div className="project-health-bar" aria-label="项目健康概览">
+      {items.map((item) => {
+        const className = [
+          "project-health-pill",
+          `project-health-pill--${item.variant ?? "neutral"}`,
+          item.filter ? "project-health-pill--clickable" : "",
+        ]
+          .filter(Boolean)
+          .join(" ");
+
+        return (
+          <button
+            key={item.key}
+            type="button"
+            className={className}
+            onClick={() => {
+              if (item.filter) {
+                onFilterChange(item.filter);
+              }
+            }}
+            disabled={!item.filter}
+            title={item.filter ? `筛选${item.label}` : undefined}
+          >
+            <span className="project-health-pill-label">{item.label}</span>
+            <span className="project-health-pill-value">{item.value}</span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 function TaskListTableContent({
   rowHeight,
   rowWidth,
@@ -345,6 +552,7 @@ function TaskListTableContent({
   selectedTaskId,
   setSelectedTask,
   taskById,
+  dependencyTaskById,
   onEditTask,
   onDeleteTask,
   onToggleExpand,
@@ -357,10 +565,37 @@ function TaskListTableContent({
   const [draggingTaskId, setDraggingTaskId] = useState<string | null>(null);
   const [dropTargetId, setDropTargetId] = useState<string | null>(null);
   const [dropPosition, setDropPosition] = useState<"before" | "after" | "inside" | null>(null);
+  const [dependencyPopover, setDependencyPopover] = useState<DependencyPopoverState | null>(null);
+  const [statusHelpPopover, setStatusHelpPopover] = useState<StatusHelpPopoverState | null>(null);
+  const [pendingMilestonePass, setPendingMilestonePass] = useState<PendingMilestonePass | null>(null);
   const displayTasks = useMemo(
     () => tasks.filter((task) => task.id !== RANGE_EXTENDER_TASK_ID),
     [tasks]
   );
+
+  useEffect(() => {
+    if (!dependencyPopover) return undefined;
+
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (!(target instanceof Element)) return;
+      if (
+        target.closest(".dependency-warning-button") ||
+        target.closest(".dependency-warning-popover") ||
+        target.closest(".status-help-button") ||
+        target.closest(".status-help-popover")
+      ) {
+        return;
+      }
+      setDependencyPopover(null);
+      setStatusHelpPopover(null);
+    };
+
+    document.addEventListener("pointerdown", handlePointerDown);
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown);
+    };
+  }, [dependencyPopover]);
 
   const isInvalidDropTarget = (dragId: string, targetId: string) => {
     if (dragId === targetId) return true;
@@ -429,6 +664,12 @@ function TaskListTableContent({
         const displayStatus = originalTask
           ? getTaskDisplayStatus(originalTask)
           : ({ label: "—", variant: "none" } satisfies TaskDisplayStatus);
+        const dependencyIssues = originalTask ? getDependencyIssues(originalTask, dependencyTaskById) : [];
+        const milestonePassIssues =
+          originalTask && displayStatus.actionLabel === "确认通过"
+            ? getDependencyIssues(originalTask, dependencyTaskById, { assumeProgress: 100 })
+            : [];
+        const isDependencyPopoverOpen = Boolean(originalTask && dependencyPopover?.taskId === originalTask.id);
         const nameIndentStyle: CSSProperties = {
           paddingLeft: `${level * 16}px`,
         };
@@ -538,12 +779,67 @@ function TaskListTableContent({
                 <span className={`milestone-status-badge milestone-status-badge--${displayStatus.variant}`}>
                   {displayStatus.label}
                 </span>
+                {originalTask && (
+                  <button
+                    type="button"
+                    className={statusHelpPopover?.taskId === originalTask.id
+                      ? "status-help-button status-help-button--active"
+                      : "status-help-button"}
+                    aria-label="查看状态说明"
+                    title="查看状态说明"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      const rect = event.currentTarget.getBoundingClientRect();
+                      setStatusHelpPopover((current) =>
+                        current?.taskId === originalTask.id
+                          ? null
+                          : {
+                              taskId: originalTask.id,
+                              left: rect.left + rect.width / 2,
+                              top: rect.bottom + 8,
+                            }
+                      );
+                      setDependencyPopover(null);
+                    }}
+                  >
+                    ?
+                  </button>
+                )}
+                {dependencyIssues.length > 0 && originalTask && (
+                  <button
+                    type="button"
+                    className={isDependencyPopoverOpen
+                      ? "dependency-warning-button dependency-warning-button--active"
+                      : "dependency-warning-button"}
+                    aria-label="查看依赖异常详情"
+                    title="查看依赖异常详情"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      const rect = event.currentTarget.getBoundingClientRect();
+                      setDependencyPopover((current) =>
+                        current?.taskId === originalTask.id
+                          ? null
+                          : {
+                              taskId: originalTask.id,
+                              left: rect.left + rect.width / 2,
+                              top: rect.bottom + 8,
+                            }
+                      );
+                    }}
+                  >
+                    !
+                  </button>
+                )}
                 {displayStatus.actionLabel && originalTask && (
                   <button
                     type="button"
                     className="task-action-button task-action-button--compact"
                     onClick={(event) => {
                       event.stopPropagation();
+                      if (displayStatus.actionLabel === "确认通过" && milestonePassIssues.length > 0) {
+                        setPendingMilestonePass({ task: originalTask, issues: milestonePassIssues });
+                        return;
+                      }
                       onToggleMilestonePassed(originalTask.id);
                     }}
                   >
@@ -585,6 +881,108 @@ function TaskListTableContent({
           </div>
         );
       })}
+      {dependencyPopover && (() => {
+        const task = dependencyTaskById.get(dependencyPopover.taskId);
+        const issues = task ? getDependencyIssues(task, dependencyTaskById) : [];
+        if (!task || issues.length === 0) return null;
+
+        return (
+          <div
+            className="dependency-warning-popover"
+            style={{ left: dependencyPopover.left, top: dependencyPopover.top }}
+            role="dialog"
+            aria-label="依赖异常详情"
+          >
+            <div className="dependency-warning-popover-title">{task.name}</div>
+            {issues.map((issue) => (
+              <div key={issue.key} className="dependency-warning-popover-item">
+                <div className="dependency-warning-popover-line">
+                  与“{issue.predecessorName}”存在 {issue.dependencyType} 依赖
+                </div>
+                <div className="dependency-warning-popover-desc">{issue.description}</div>
+              </div>
+            ))}
+            <div className="dependency-warning-popover-advice">
+              建议先完成前置任务，或调整依赖关系。
+            </div>
+          </div>
+        );
+      })()}
+      {statusHelpPopover && (() => {
+        const task = dependencyTaskById.get(statusHelpPopover.taskId);
+        if (!task) return null;
+        const isMilestone = (task.type ?? "task") === "milestone";
+
+        return (
+          <div
+            className="status-help-popover"
+            style={{ left: statusHelpPopover.left, top: statusHelpPopover.top }}
+            role="dialog"
+            aria-label="状态说明"
+          >
+            <div className="status-help-popover-title">状态说明</div>
+            <div className="status-help-popover-list">
+              <div><strong>未开始</strong>：计划日期未到，且还没有开始。</div>
+              <div><strong>进行中</strong>：任务已有进度，或当前日期处于计划区间内。</div>
+              <div><strong>已完成</strong>：任务进度达到 100%。</div>
+              <div><strong>已延期</strong>：超过计划结束日期但仍未完成。</div>
+              {isMilestone && (
+                <>
+                  <div><strong>待确认</strong>：节点日期已到，需要人工确认通过。</div>
+                  <div><strong>已通过</strong>：节点已被人工确认。</div>
+                </>
+              )}
+              <div><strong>红色 !</strong>：当前进度或节点状态与前置依赖存在冲突。</div>
+            </div>
+          </div>
+        );
+      })()}
+      {pendingMilestonePass && (
+        <div className="dependency-confirm-overlay" role="presentation">
+          <div
+            className="dependency-confirm-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-label="依赖未满足确认"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="dependency-confirm-title">依赖尚未满足</div>
+            <div className="dependency-confirm-body">
+              里程碑“{pendingMilestonePass.task.name}”的前置依赖尚未满足，默认不建议确认通过。
+            </div>
+            <div className="dependency-confirm-issues">
+              {pendingMilestonePass.issues.map((issue) => (
+                <div key={issue.key} className="dependency-confirm-issue">
+                  <strong>{issue.dependencyType}</strong>
+                  <span>与“{issue.predecessorName}”存在依赖，{issue.description}。</span>
+                </div>
+              ))}
+            </div>
+            <div className="dependency-confirm-advice">
+              建议先完成前置任务，或调整依赖关系；如果确认业务上允许，可强制通过。
+            </div>
+            <div className="dependency-confirm-actions">
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={() => setPendingMilestonePass(null)}
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                className="danger-button"
+                onClick={() => {
+                  onToggleMilestonePassed(pendingMilestonePass.task.id, { force: true });
+                  setPendingMilestonePass(null);
+                }}
+              >
+                强制通过
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       <div
         className="task-list-dropzone"
         style={{ height: Math.max(12, rowHeight / 3) }}
@@ -885,6 +1283,11 @@ function matchesTaskFilter(task: TaskRow, filter: TaskFilterValue) {
   if (filter === "task") return type === "task" && !task.hasChildren;
   if (filter === "milestone") return type === "milestone";
   if (filter === "summary") return task.hasChildren;
+  if (filter === "completed") return isCountableTask(task) && task.scheduleStatus === "completed";
+  if (filter === "overdue") {
+    return isCountableTask(task) && task.scheduleStatus === "overdue";
+  }
+  if (filter === "readyMilestone") return isCountableMilestone(task) && isMilestoneAwaitingConfirmation(task);
   if (filter === "globalCritical") return Boolean(task.isCritical);
   return Boolean(task.isLocalCritical);
 }
@@ -966,6 +1369,7 @@ export function GanttChart({
     () => TASK_FILTER_OPTIONS.filter((option) => !option.requiresLocalSummary || Boolean(selectedSummaryTaskId)),
     [selectedSummaryTaskId]
   );
+  const healthStats = useMemo(() => calculateProjectHealthStats(allTasks), [allTasks]);
 
   useEffect(() => {
     if (taskFilter === "localCritical" && !selectedSummaryTaskId) {
@@ -1083,6 +1487,7 @@ export function GanttChart({
   }, [displayTasks, ganttWidth, showCriticalPath, viewConfig.columnWidth, viewConfig.preStepsCount, viewMode]);
 
   const taskById = useMemo(() => new Map(displayTasks.map((task) => [task.id, task])), [displayTasks]);
+  const allTaskById = useMemo(() => new Map(allTasks.map((task) => [task.id, task])), [allTasks]);
 
   const Tooltip = useMemo(() => {
     const WrappedTooltip: FC<TooltipContentProps> = (props) => {
@@ -1302,6 +1707,7 @@ export function GanttChart({
       <TaskListTableContent
         {...props}
         taskById={taskById}
+        dependencyTaskById={allTaskById}
         onEditTask={onEditTask}
         onDeleteTask={onDeleteTask}
         onToggleExpand={onToggleExpand}
@@ -1314,6 +1720,7 @@ export function GanttChart({
     return Table;
   }, [
     taskById,
+    allTaskById,
     onEditTask,
     onDeleteTask,
     onToggleExpand,
@@ -1452,6 +1859,7 @@ export function GanttChart({
           </div>
         </div>
       </div>
+      <ProjectHealthBar stats={healthStats} onFilterChange={setTaskFilter} />
       {criticalPathError && showCriticalPath && (
         <div className="critical-path-warning" role="alert">
           {criticalPathError}
