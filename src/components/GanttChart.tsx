@@ -1753,6 +1753,12 @@ export function GanttChart({
     onSelectSummaryTask(originalTask.id);
   };
 
+  const handleTaskDoubleClick = (clickedTask: GanttTask) => {
+    const originalTask = taskById.get(clickedTask.id);
+    if (!originalTask) return;
+    onEditTask(originalTask);
+  };
+
   const resolveHorizontalScroll = () => {
     if (horizontalScrollRef.current && horizontalScrollRef.current.isConnected) {
       return horizontalScrollRef.current;
@@ -1895,6 +1901,7 @@ export function GanttChart({
             TaskListTable={TaskListTable}
             TooltipContent={Tooltip}
             onClick={handleTaskClick}
+            onDoubleClick={handleTaskDoubleClick}
             onDateChange={handleDateChange}
           />
           {dependencyOverlay && (
