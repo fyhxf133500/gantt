@@ -140,7 +140,6 @@ type DependencyPopoverState = {
 };
 
 type StatusHelpPopoverState = {
-  taskId: string;
   left: number;
   top: number;
 };
@@ -450,11 +449,13 @@ function getChartViewport(chartSvg: SVGSVGElement, root: HTMLDivElement) {
 }
 
 function TaskListHeader({ headerHeight, rowWidth, fontFamily, fontSize }: TaskListHeaderProps) {
+  const [statusHelpPopover, setStatusHelpPopover] = useState<StatusHelpPopoverState | null>(null);
   const cellStyle: CSSProperties = {
     minWidth: rowWidth,
     padding: "0 8px",
     display: "flex",
     alignItems: "center",
+    gap: 6,
     height: "100%",
   };
   const separatorStyle: CSSProperties = {
@@ -463,6 +464,22 @@ function TaskListHeader({ headerHeight, rowWidth, fontFamily, fontSize }: TaskLi
     marginTop: headerHeight * 0.2,
     background: "#e2e8f0",
   };
+
+  useEffect(() => {
+    if (!statusHelpPopover) return undefined;
+
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (!(target instanceof Element)) return;
+      if (target.closest(".status-help-button") || target.closest(".status-help-popover")) return;
+      setStatusHelpPopover(null);
+    };
+
+    document.addEventListener("pointerdown", handlePointerDown);
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown);
+    };
+  }, [statusHelpPopover]);
 
   return (
     <div style={{ fontFamily, fontSize }}>
@@ -477,11 +494,54 @@ function TaskListHeader({ headerHeight, rowWidth, fontFamily, fontSize }: TaskLi
       >
         {HEADER_COLUMNS.map((label, index) => (
           <div key={label} style={{ display: "flex", alignItems: "center" }}>
-            <div style={cellStyle}>{label}</div>
+            <div style={cellStyle}>
+              <span>{label}</span>
+              {label === "状态" && (
+                <button
+                  type="button"
+                  className={statusHelpPopover ? "status-help-button status-help-button--active" : "status-help-button"}
+                  aria-label="查看状态说明"
+                  title="查看状态说明"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    const rect = event.currentTarget.getBoundingClientRect();
+                    setStatusHelpPopover((current) =>
+                      current
+                        ? null
+                        : {
+                            left: rect.left + rect.width / 2,
+                            top: rect.bottom + 8,
+                          }
+                    );
+                  }}
+                >
+                  ?
+                </button>
+              )}
+            </div>
             {index < HEADER_COLUMNS.length - 1 && <div style={separatorStyle} />}
           </div>
         ))}
       </div>
+      {statusHelpPopover && (
+        <div
+          className="status-help-popover"
+          style={{ left: statusHelpPopover.left, top: statusHelpPopover.top }}
+          role="dialog"
+          aria-label="状态说明"
+        >
+          <div className="status-help-popover-title">状态说明</div>
+          <div className="status-help-popover-list">
+            <div><strong>未开始</strong>：计划日期未到，且还没有开始。</div>
+            <div><strong>进行中</strong>：任务已有进度，或当前日期处于计划区间内。</div>
+            <div><strong>已完成</strong>：任务进度达到 100%。</div>
+            <div><strong>已延期</strong>：超过计划结束日期但仍未完成。</div>
+            <div><strong>待确认</strong>：节点日期已到，需要人工确认通过。</div>
+            <div><strong>已通过</strong>：节点已被人工确认。</div>
+            <div><strong>红色 !</strong>：当前进度或节点状态与前置依赖存在冲突。</div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -566,7 +626,6 @@ function TaskListTableContent({
   const [dropTargetId, setDropTargetId] = useState<string | null>(null);
   const [dropPosition, setDropPosition] = useState<"before" | "after" | "inside" | null>(null);
   const [dependencyPopover, setDependencyPopover] = useState<DependencyPopoverState | null>(null);
-  const [statusHelpPopover, setStatusHelpPopover] = useState<StatusHelpPopoverState | null>(null);
   const [pendingMilestonePass, setPendingMilestonePass] = useState<PendingMilestonePass | null>(null);
   const displayTasks = useMemo(
     () => tasks.filter((task) => task.id !== RANGE_EXTENDER_TASK_ID),
@@ -581,14 +640,11 @@ function TaskListTableContent({
       if (!(target instanceof Element)) return;
       if (
         target.closest(".dependency-warning-button") ||
-        target.closest(".dependency-warning-popover") ||
-        target.closest(".status-help-button") ||
-        target.closest(".status-help-popover")
+        target.closest(".dependency-warning-popover")
       ) {
         return;
       }
       setDependencyPopover(null);
-      setStatusHelpPopover(null);
     };
 
     document.addEventListener("pointerdown", handlePointerDown);
@@ -779,32 +835,6 @@ function TaskListTableContent({
                 <span className={`milestone-status-badge milestone-status-badge--${displayStatus.variant}`}>
                   {displayStatus.label}
                 </span>
-                {originalTask && (
-                  <button
-                    type="button"
-                    className={statusHelpPopover?.taskId === originalTask.id
-                      ? "status-help-button status-help-button--active"
-                      : "status-help-button"}
-                    aria-label="查看状态说明"
-                    title="查看状态说明"
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      const rect = event.currentTarget.getBoundingClientRect();
-                      setStatusHelpPopover((current) =>
-                        current?.taskId === originalTask.id
-                          ? null
-                          : {
-                              taskId: originalTask.id,
-                              left: rect.left + rect.width / 2,
-                              top: rect.bottom + 8,
-                            }
-                      );
-                      setDependencyPopover(null);
-                    }}
-                  >
-                    ?
-                  </button>
-                )}
                 {dependencyIssues.length > 0 && originalTask && (
                   <button
                     type="button"
@@ -904,35 +934,6 @@ function TaskListTableContent({
             ))}
             <div className="dependency-warning-popover-advice">
               建议先完成前置任务，或调整依赖关系。
-            </div>
-          </div>
-        );
-      })()}
-      {statusHelpPopover && (() => {
-        const task = dependencyTaskById.get(statusHelpPopover.taskId);
-        if (!task) return null;
-        const isMilestone = (task.type ?? "task") === "milestone";
-
-        return (
-          <div
-            className="status-help-popover"
-            style={{ left: statusHelpPopover.left, top: statusHelpPopover.top }}
-            role="dialog"
-            aria-label="状态说明"
-          >
-            <div className="status-help-popover-title">状态说明</div>
-            <div className="status-help-popover-list">
-              <div><strong>未开始</strong>：计划日期未到，且还没有开始。</div>
-              <div><strong>进行中</strong>：任务已有进度，或当前日期处于计划区间内。</div>
-              <div><strong>已完成</strong>：任务进度达到 100%。</div>
-              <div><strong>已延期</strong>：超过计划结束日期但仍未完成。</div>
-              {isMilestone && (
-                <>
-                  <div><strong>待确认</strong>：节点日期已到，需要人工确认通过。</div>
-                  <div><strong>已通过</strong>：节点已被人工确认。</div>
-                </>
-              )}
-              <div><strong>红色 !</strong>：当前进度或节点状态与前置依赖存在冲突。</div>
             </div>
           </div>
         );
