@@ -172,7 +172,7 @@ type PendingMilestonePass = {
 
 const HEADER_HEIGHT = 64;
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
-const HEADER_COLUMNS = ["任务名称", "开始时间", "结束时间", "状态", "操作"];
+const HEADER_COLUMNS = ["任务名称", "计划开始", "计划结束", "状态", "操作"];
 const TASK_LIST_COLUMN_WIDTH = 155;
 const TASK_LIST_WIDTH = HEADER_COLUMNS.length * TASK_LIST_COLUMN_WIDTH;
 const TIMELINE_RIGHT_SAFE_WIDTH = 24;
