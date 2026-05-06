@@ -3,7 +3,7 @@ import type { CSSProperties, MouseEvent, WheelEvent, FC } from "react";
 import { Gantt, Task as GanttTask, ViewMode } from "gantt-task-react";
 import "gantt-task-react/dist/index.css";
 import type { Task, TaskDependency } from "../types/task";
-import { GanttToolbar } from "./GanttToolbar";
+import { GanttToolbar, type GanttDisplayMode } from "./GanttToolbar";
 
 export type GanttChartProps = {
   projectId: string | null;
@@ -75,6 +75,7 @@ type TaskListTableContentProps = TaskListTableBaseProps & {
   onToggleMilestonePassed: (id: string, options?: { force?: boolean }) => void;
   selectedSummaryTaskId: string | null;
   onSelectSummaryTask: (id: string) => void;
+  onHoverTask: (taskId: string | null) => void;
 };
 
 type TooltipContentProps = {
@@ -85,6 +86,8 @@ type TooltipContentProps = {
 
 type DependencyPath = {
   key: string;
+  taskId: string;
+  predecessorId: string;
   d: string;
   type: TaskDependency["type"];
   isCritical: boolean;
@@ -96,8 +99,10 @@ type DependencyOverlayLayout = {
   top: number;
   width: number;
   height: number;
+  summaryBars: SummaryBarOverlay[];
   paths: DependencyPath[];
   actualBars: ActualBarOverlay[];
+  globalCriticalRects: OverlayRect[];
   localCriticalRects: OverlayRect[];
   milestones: MilestoneOverlay[];
 };
@@ -115,6 +120,13 @@ type MilestoneOverlay = {
   rect: OverlayRect;
   isCritical: boolean;
   isLocalCritical: boolean;
+};
+
+type SummaryBarOverlay = {
+  id: string;
+  name: string;
+  rect: OverlayRect;
+  progressWidth: number;
 };
 
 type ActualBarOverlay = {
@@ -987,6 +999,7 @@ function TaskListTableContent({
   onToggleMilestonePassed,
   selectedSummaryTaskId,
   onSelectSummaryTask,
+  onHoverTask,
 }: TaskListTableContentProps) {
   const dateFormatter = useMemo(() => new Intl.DateTimeFormat(locale, DATE_FORMAT_OPTIONS), [locale]);
   const [draggingTaskId, setDraggingTaskId] = useState<string | null>(null);
@@ -1108,6 +1121,8 @@ function TaskListTableContent({
             key={`${task.id}-row`}
             className={rowClassName}
             style={{ height: rowHeight }}
+            onMouseEnter={() => onHoverTask(task.id)}
+            onMouseLeave={() => onHoverTask(null)}
             onClick={(event) => {
               event.stopPropagation();
               setSelectedTask(task.id);
@@ -1828,16 +1843,20 @@ export function GanttChart({
   onClearSelectedSummaryTask,
 }: GanttChartProps) {
   const [viewMode, setViewMode] = useState<ViewMode>(ViewMode.Day);
-  const [showCriticalPath, setShowCriticalPath] = useState(true);
+  const [displayMode, setDisplayMode] = useState<GanttDisplayMode>("simple");
+  const [showCriticalPath, setShowCriticalPath] = useState(false);
   const [showActual, setShowActual] = useState(false);
   const [taskSearch, setTaskSearch] = useState("");
   const [taskFilter, setTaskFilter] = useState<TaskFilterValue>("all");
   const [dependencyOverlay, setDependencyOverlay] = useState<DependencyOverlayLayout | null>(null);
   const [actualTooltip, setActualTooltip] = useState<ActualTooltipState | null>(null);
+  const [hoveredTaskId, setHoveredTaskId] = useState<string | null>(null);
   const [ganttWidth, setGanttWidth] = useState(0);
   const ganttContainerRef = useRef<HTMLDivElement | null>(null);
   const horizontalScrollRef = useRef<HTMLDivElement | null>(null);
   const viewConfig = useMemo(() => getViewConfig(viewMode), [viewMode]);
+  const effectiveShowActual = displayMode === "analysis" && showActual;
+  const effectiveShowCriticalPath = showCriticalPath;
   const filteredTaskResult = useMemo(
     () => filterTaskRows(tasks, allTasks, taskSearch, taskFilter),
     [allTasks, taskFilter, taskSearch, tasks]
@@ -1849,8 +1868,20 @@ export function GanttChart({
     [selectedSummaryTaskId]
   );
   const healthStats = useMemo(() => calculateProjectHealthStats(allTasks), [allTasks]);
-  const timelineStart = useMemo(() => getEarliestStart(displayTasks, showActual), [displayTasks, showActual]);
-  const timelineEnd = useMemo(() => getLatestEnd(displayTasks, showActual), [displayTasks, showActual]);
+  const timelineStart = useMemo(() => getEarliestStart(displayTasks, effectiveShowActual), [displayTasks, effectiveShowActual]);
+  const timelineEnd = useMemo(() => getLatestEnd(displayTasks, effectiveShowActual), [displayTasks, effectiveShowActual]);
+
+  const handleDisplayModeChange = (mode: GanttDisplayMode) => {
+    setDisplayMode(mode);
+    if (mode === "simple") {
+      setShowActual(false);
+      setShowCriticalPath(false);
+      return;
+    }
+
+    setShowActual(true);
+    setShowCriticalPath(true);
+  };
 
   useEffect(() => {
     if (taskFilter === "localCritical" && !selectedSummaryTaskId) {
@@ -1879,8 +1910,8 @@ export function GanttChart({
     const mappedTasks = displayTasks.map((task) => {
       const isSummary = task.hasChildren;
       const isMilestone = (task.type ?? "task") === "milestone";
-      const isCritical = showCriticalPath && task.isCritical && !isSummary;
-      const isCriticalSummary = showCriticalPath && task.isCritical && isSummary;
+      const isCritical = effectiveShowCriticalPath && task.isCritical && !isSummary;
+      const isCriticalSummary = effectiveShowCriticalPath && task.isCritical && isSummary;
       const isCriticalMilestone = isMilestone && isCritical;
       return {
         id: task.id,
@@ -1893,25 +1924,23 @@ export function GanttChart({
         styles: isSummary
           ? isCriticalSummary
             ? {
-                backgroundColor: "#fee2e2",
-                backgroundSelectedColor: "#fecaca",
-                progressColor: "#f97316",
-                progressSelectedColor: "#ea580c",
+                backgroundColor: "#dcefdc",
+                backgroundSelectedColor: "#c6e7c8",
+                progressColor: "#6ea878",
+                progressSelectedColor: "#5b9465",
               }
             : {
-                backgroundColor: "#d1fae5",
-                backgroundSelectedColor: "#a7f3d0",
-                progressColor: "#34d399",
-                progressSelectedColor: "#10b981",
+                backgroundColor: "#dcefdc",
+                backgroundSelectedColor: "#c6e7c8",
+                progressColor: "#6ea878",
+                progressSelectedColor: "#5b9465",
               }
           : isMilestone
             ? {
-                backgroundColor: "rgba(245, 158, 11, 0.08)",
-                backgroundSelectedColor: "rgba(245, 158, 11, 0.12)",
-                progressColor: isCriticalMilestone ? "rgba(239, 68, 68, 0.08)" : "rgba(245, 158, 11, 0.08)",
-                progressSelectedColor: isCriticalMilestone
-                  ? "rgba(239, 68, 68, 0.12)"
-                  : "rgba(245, 158, 11, 0.12)",
+                backgroundColor: "rgba(245, 158, 11, 0.12)",
+                backgroundSelectedColor: "rgba(245, 158, 11, 0.18)",
+                progressColor: isCriticalMilestone ? "rgba(245, 158, 11, 0.2)" : "rgba(245, 158, 11, 0.14)",
+                progressSelectedColor: "rgba(245, 158, 11, 0.22)",
               }
           : isCritical
             ? {
@@ -1920,7 +1949,12 @@ export function GanttChart({
                 progressColor: "#ef4444",
                 progressSelectedColor: "#dc2626",
               }
-            : undefined,
+            : {
+                backgroundColor: "#dbeafe",
+                backgroundSelectedColor: "#c7d2fe",
+                progressColor: "#6366f1",
+                progressSelectedColor: "#4f46e5",
+              },
       };
     });
 
@@ -1964,8 +1998,7 @@ export function GanttChart({
   }, [
     displayTasks,
     ganttWidth,
-    showActual,
-    showCriticalPath,
+    effectiveShowCriticalPath,
     timelineEnd,
     timelineStart,
     viewConfig.columnWidth,
@@ -2043,6 +2076,20 @@ export function GanttChart({
         );
       });
 
+      const summaryBars = displayTasks.flatMap<SummaryBarOverlay>((task) => {
+        if (!task.hasChildren) return [];
+        const rect = barRectById.get(task.id);
+        if (!rect) return [];
+        return [
+          {
+            id: task.id,
+            name: task.name,
+            rect,
+            progressWidth: rect.width * Math.max(0, Math.min(100, task.progress)) / 100,
+          },
+        ];
+      });
+
       const paths: DependencyPath[] = [];
       displayTasks.forEach((task) => {
         (task.dependencies ?? []).forEach((dependency, dependencyIndex) => {
@@ -2053,13 +2100,15 @@ export function GanttChart({
           const predecessorTask = taskById.get(dependency.taskId);
           paths.push({
             key: `${task.id}-${dependency.taskId}-${dependency.type}-${dependencyIndex}`,
+            taskId: task.id,
+            predecessorId: dependency.taskId,
             d: buildDependencyPath(dependency, predecessorRect, currentRect),
             type: dependency.type,
             isCritical: Boolean(
-              showCriticalPath && dependency.isCritical && task.isCritical && predecessorTask?.isCritical
+              effectiveShowCriticalPath && dependency.isCritical && task.isCritical && predecessorTask?.isCritical
             ),
             isLocalCritical: Boolean(
-              showCriticalPath &&
+              effectiveShowCriticalPath &&
                 dependency.isLocalCritical &&
                 task.isLocalCritical &&
                 predecessorTask?.isLocalCritical
@@ -2068,7 +2117,16 @@ export function GanttChart({
         });
       });
 
-      const localCriticalRects = showCriticalPath
+      const globalCriticalRects = effectiveShowCriticalPath
+        ? displayTasks.flatMap((task) => {
+            if (!task.isCritical) return [];
+            if ((task.type ?? "task") === "milestone") return [];
+            const rect = barRectById.get(task.id);
+            return rect ? [rect] : [];
+          })
+        : [];
+
+      const localCriticalRects = effectiveShowCriticalPath
         ? displayTasks.flatMap((task) => {
             if (!task.isLocalCritical) return [];
             if ((task.type ?? "task") === "milestone") return [];
@@ -2081,7 +2139,7 @@ export function GanttChart({
         ? getRangeStart(timelineStart, viewMode, viewConfig.preStepsCount)
         : null;
       const chartScrollLeft = chartViewport instanceof HTMLElement ? chartViewport.scrollLeft : 0;
-      const actualBars = showActual && actualRangeStart
+      const actualBars = effectiveShowActual && actualRangeStart
         ? displayTasks.flatMap<ActualBarOverlay>((task) => {
             const rawRect = rawBarRectById.get(task.id);
             if (!rawRect) return [];
@@ -2106,13 +2164,20 @@ export function GanttChart({
             id: task.id,
             name: task.name,
             rect,
-            isCritical: Boolean(showCriticalPath && task.isCritical),
-            isLocalCritical: Boolean(showCriticalPath && task.isLocalCritical),
+            isCritical: Boolean(effectiveShowCriticalPath && task.isCritical),
+            isLocalCritical: Boolean(effectiveShowCriticalPath && task.isLocalCritical),
           },
         ];
       });
 
-      if (paths.length === 0 && actualBars.length === 0 && localCriticalRects.length === 0 && milestones.length === 0) {
+      if (
+        paths.length === 0 &&
+        summaryBars.length === 0 &&
+        actualBars.length === 0 &&
+        globalCriticalRects.length === 0 &&
+        localCriticalRects.length === 0 &&
+        milestones.length === 0
+      ) {
         setDependencyOverlay(null);
         return;
       }
@@ -2122,8 +2187,10 @@ export function GanttChart({
         top: viewportRect.top - wrapperRect.top,
         width: viewportRect.width,
         height: viewportRect.height,
+        summaryBars,
         paths,
         actualBars,
+        globalCriticalRects,
         localCriticalRects,
         milestones,
       });
@@ -2166,7 +2233,7 @@ export function GanttChart({
       root.removeEventListener("scroll", handleScroll, true);
       window.removeEventListener("resize", handleScroll);
     };
-  }, [displayTasks, taskById, viewMode, showCriticalPath, showActual, timelineStart, viewConfig.columnWidth, viewConfig.preStepsCount]);
+  }, [displayTasks, taskById, viewMode, effectiveShowCriticalPath, effectiveShowActual, timelineStart, viewConfig.columnWidth, viewConfig.preStepsCount]);
 
   const viewDate = useMemo(() => getViewDate(timelineStart, viewMode), [timelineStart, viewMode]);
 
@@ -2224,6 +2291,7 @@ export function GanttChart({
         onToggleMilestonePassed={onToggleMilestonePassed}
         selectedSummaryTaskId={selectedSummaryTaskId}
         onSelectSummaryTask={onSelectSummaryTask}
+        onHoverTask={setHoveredTaskId}
       />
     );
     return Table;
@@ -2237,6 +2305,7 @@ export function GanttChart({
     onToggleMilestonePassed,
     selectedSummaryTaskId,
     onSelectSummaryTask,
+    setHoveredTaskId,
   ]);
 
   const handleDateChange = (updatedTask: GanttTask) => {
@@ -2332,6 +2401,33 @@ export function GanttChart({
     onClearSelectedSummaryTask();
   };
 
+  const handleChartAreaMouseMove = (event: MouseEvent<HTMLDivElement>) => {
+    const target = event.target;
+    if (!(target instanceof Element)) return;
+    if (target.closest(".task-list-row")) return;
+
+    const barGroup = target.closest("g[tabindex='0']");
+    const root = ganttContainerRef.current;
+    if (!barGroup || !root) {
+      if (hoveredTaskId) setHoveredTaskId(null);
+      return;
+    }
+
+    const chartSvg = getChartSvg(root);
+    if (!chartSvg) return;
+
+    const barElements = Array.from(chartSvg.querySelectorAll<SVGGElement>("g[tabindex='0']"));
+    const index = barElements.indexOf(barGroup as SVGGElement);
+    const taskId = index >= 0 ? displayTasks[index]?.id ?? null : null;
+    if (taskId !== hoveredTaskId) {
+      setHoveredTaskId(taskId);
+    }
+  };
+
+  const handleChartAreaMouseLeave = () => {
+    setHoveredTaskId(null);
+  };
+
   return (
     <div className="gantt-wrapper">
       <div className="gantt-toolbar">
@@ -2358,12 +2454,18 @@ export function GanttChart({
           </select>
         </div>
         <div className="gantt-toolbar-controls">
-          <GanttToolbar viewMode={viewMode} onChange={setViewMode} />
+          <GanttToolbar
+            viewMode={viewMode}
+            displayMode={displayMode}
+            onChange={setViewMode}
+            onDisplayModeChange={handleDisplayModeChange}
+          />
           <div className="gantt-toolbar-actions">
-            <label className="critical-path-toggle">
+            <label className={displayMode === "simple" ? "critical-path-toggle critical-path-toggle--muted" : "critical-path-toggle"}>
               <input
                 type="checkbox"
-                checked={showActual}
+                checked={effectiveShowActual}
+                disabled={displayMode === "simple"}
                 onChange={(event) => setShowActual(event.target.checked)}
               />
               <span>显示实际</span>
@@ -2399,9 +2501,11 @@ export function GanttChart({
         </div>
       ) : (
         <div
-          className="gantt-chart-area"
+          className={`gantt-chart-area gantt-chart-area--${displayMode}`}
           onWheel={handleWheel}
           onClick={handleChartAreaClick}
+          onMouseMove={handleChartAreaMouseMove}
+          onMouseLeave={handleChartAreaMouseLeave}
           ref={ganttContainerRef}
         >
           <Gantt
@@ -2412,7 +2516,8 @@ export function GanttChart({
             locale="zh-CN"
             headerHeight={HEADER_HEIGHT}
             columnWidth={viewConfig.columnWidth}
-            barFill={showActual ? DUAL_TRACK_PLAN_BAR_FILL : PLAN_BAR_FILL}
+            rowHeight={effectiveShowActual ? 54 : 46}
+            barFill={effectiveShowActual ? DUAL_TRACK_PLAN_BAR_FILL : PLAN_BAR_FILL}
             preStepsCount={viewConfig.preStepsCount}
             TaskListHeader={TaskListHeader}
             TaskListTable={TaskListTable}
@@ -2448,7 +2553,7 @@ export function GanttChart({
                     orient="auto"
                     markerUnits="strokeWidth"
                   >
-                    <path d="M 0 0 L 6 3 L 0 6 z" fill="#2563eb" />
+                    <path d="M 0 0 L 6 3 L 0 6 z" fill="rgba(100, 116, 139, 0.62)" />
                   </marker>
                   <marker
                     id="dependency-critical-arrow-head"
@@ -2459,7 +2564,7 @@ export function GanttChart({
                     orient="auto"
                     markerUnits="strokeWidth"
                   >
-                    <path d="M 0 0 L 6 3 L 0 6 z" fill="#dc2626" />
+                    <path d="M 0 0 L 6 3 L 0 6 z" fill="rgba(220, 38, 38, 0.76)" />
                   </marker>
                   <marker
                     id="dependency-local-critical-arrow-head"
@@ -2470,9 +2575,44 @@ export function GanttChart({
                     orient="auto"
                     markerUnits="strokeWidth"
                   >
-                    <path d="M 0 0 L 6 3 L 0 6 z" fill="#f97316" />
+                    <path d="M 0 0 L 6 3 L 0 6 z" fill="rgba(249, 115, 22, 0.76)" />
                   </marker>
                 </defs>
+                {dependencyOverlay.summaryBars.map((bar) => {
+                  const labelX = bar.rect.x + Math.min(Math.max(12, bar.rect.width / 2), Math.max(12, bar.rect.width - 12));
+                  const labelY = bar.rect.y + bar.rect.height / 2;
+                  return (
+                    <g key={`summary-bar-${bar.id}`} className="summary-bar-overlay">
+                      <rect
+                        x={bar.rect.x}
+                        y={bar.rect.y}
+                        width={bar.rect.width}
+                        height={bar.rect.height}
+                        rx="6"
+                        className="summary-bar-overlay-bg"
+                      />
+                      {bar.progressWidth > 0 && (
+                        <rect
+                          x={bar.rect.x}
+                          y={bar.rect.y}
+                          width={bar.progressWidth}
+                          height={bar.rect.height}
+                          rx="6"
+                          className="summary-bar-overlay-progress"
+                        />
+                      )}
+                      <text
+                        x={labelX}
+                        y={labelY}
+                        className="summary-bar-overlay-label"
+                        dominantBaseline="middle"
+                        textAnchor="middle"
+                      >
+                        {bar.name}
+                      </text>
+                    </g>
+                  );
+                })}
                 {dependencyOverlay.actualBars.map((bar) => {
                   const bounds = getActualBarBounds(bar);
                   return (
@@ -2534,14 +2674,25 @@ export function GanttChart({
                     </g>
                   );
                 })}
+                {dependencyOverlay.globalCriticalRects.map((rect, index) => (
+                  <rect
+                    key={`global-critical-task-${index}`}
+                    x={rect.x - 2}
+                    y={rect.y - 2}
+                    width={rect.width + 4}
+                    height={rect.height + 4}
+                    rx="7"
+                    className="global-critical-task-outline"
+                  />
+                ))}
                 {dependencyOverlay.localCriticalRects.map((rect, index) => (
                   <rect
                     key={`local-critical-task-${index}`}
-                    x={rect.x + 1}
-                    y={rect.y + 1}
-                    width={Math.max(0, rect.width - 2)}
-                    height={Math.max(0, rect.height - 2)}
-                    rx="6"
+                    x={rect.x - 5}
+                    y={rect.y - 5}
+                    width={rect.width + 10}
+                    height={rect.height + 10}
+                    rx="9"
                     className="local-critical-task-outline"
                   />
                 ))}
@@ -2585,36 +2736,52 @@ export function GanttChart({
                     </g>
                   );
                 })}
-                {dependencyOverlay.paths.map((path) => (
-                  <g key={path.key}>
-                    <path
-                      d={path.d}
-                      className={[
-                        "dependency-path",
-                        `dependency-path--${path.type.toLowerCase()}`,
-                        path.isCritical ? "dependency-path--critical" : "",
-                        !path.isCritical && path.isLocalCritical ? "dependency-path--local-critical" : "",
-                      ]
-                        .filter(Boolean)
-                        .join(" ")}
-                      markerEnd={
-                        path.isCritical
-                          ? "url(#dependency-critical-arrow-head)"
-                          : path.isLocalCritical
-                            ? "url(#dependency-local-critical-arrow-head)"
-                            : "url(#dependency-arrow-head)"
-                      }
-                    />
-                    {path.isCritical && path.isLocalCritical && (
+                {dependencyOverlay.paths.map((path) => {
+                  const isRelatedToHover =
+                    Boolean(hoveredTaskId) &&
+                    (path.taskId === hoveredTaskId || path.predecessorId === hoveredTaskId);
+                  const isDimmedByHover = Boolean(hoveredTaskId) && !isRelatedToHover;
+                  return (
+                    <g key={path.key}>
                       <path
                         d={path.d}
-                        transform="translate(4 -4)"
-                        className="dependency-path dependency-path--local-critical dependency-path--local-critical-offset"
-                        markerEnd="url(#dependency-local-critical-arrow-head)"
+                        className={[
+                          "dependency-path",
+                          `dependency-path--${path.type.toLowerCase()}`,
+                          path.isCritical ? "dependency-path--critical" : "",
+                          !path.isCritical && path.isLocalCritical ? "dependency-path--local-critical" : "",
+                          isRelatedToHover ? "dependency-path--hover-related" : "",
+                          isDimmedByHover ? "dependency-path--hover-dimmed" : "",
+                        ]
+                          .filter(Boolean)
+                          .join(" ")}
+                        markerEnd={
+                          path.isCritical
+                            ? "url(#dependency-critical-arrow-head)"
+                            : path.isLocalCritical
+                              ? "url(#dependency-local-critical-arrow-head)"
+                              : "url(#dependency-arrow-head)"
+                        }
                       />
-                    )}
-                  </g>
-                ))}
+                      {path.isCritical && path.isLocalCritical && (
+                        <path
+                          d={path.d}
+                          transform="translate(4 -4)"
+                          className={[
+                            "dependency-path",
+                            "dependency-path--local-critical",
+                            "dependency-path--local-critical-offset",
+                            isRelatedToHover ? "dependency-path--hover-related" : "",
+                            isDimmedByHover ? "dependency-path--hover-dimmed" : "",
+                          ]
+                            .filter(Boolean)
+                            .join(" ")}
+                          markerEnd="url(#dependency-local-critical-arrow-head)"
+                        />
+                      )}
+                    </g>
+                  );
+                })}
               </svg>
               {actualTooltip && (() => {
                 const task = taskById.get(actualTooltip.taskId);
