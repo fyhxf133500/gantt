@@ -15,6 +15,8 @@ export interface Task {
   name: string;
   start: Date;
   end: Date;
+  actualStart?: Date;
+  actualEnd?: Date;
   progress: number;
   parentId?: string | null;
   dependencies?: TaskDependency[];
@@ -27,5 +29,7 @@ export interface Task {
   scheduleStatus?: ScheduleStatus;
   dependencyBlocked?: boolean;
   dependencyViolation?: boolean;
+  dependencyActualViolation?: boolean;
+  dependencyMissing?: boolean;
   isMilestoneOverdue?: boolean;
 }
