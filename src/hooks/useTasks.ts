@@ -66,10 +66,14 @@ function createTaskId() {
   return `task-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
-function normalizeDependencies(dependencies: Task["dependencies"]): TaskDependency[] {
+function normalizeDependencies(dependencies: Task["dependencies"] | Array<string | TaskDependency> | undefined): TaskDependency[] {
   if (!Array.isArray(dependencies)) return DEFAULT_DEPENDENCIES;
 
-  return dependencies.flatMap((dependency) => {
+  return dependencies.flatMap<TaskDependency>((dependency) => {
+    if (typeof dependency === "string") {
+      return dependency ? [{ taskId: dependency, type: "FS" as const }] : [];
+    }
+
     if (
       !dependency ||
       typeof dependency !== "object" ||
@@ -97,6 +101,23 @@ function getUnpassedMilestoneStatus(task: Task, date = new Date()): NonNullable<
   return utcDayStamp(date) >= utcDayStamp(task.end) ? "ready" : "pending";
 }
 
+function getMilestoneActualDate(task: Task) {
+  if ((task.type ?? "task") !== "milestone" || task.milestoneStatus !== "passed") return undefined;
+  if (task.actualEnd) return task.actualEnd;
+  if (task.passedAt) return new Date(task.passedAt);
+  return task.actualStart;
+}
+
+function getTaskActualStart(task: Task) {
+  if ((task.type ?? "task") === "milestone") return getMilestoneActualDate(task);
+  return task.actualStart;
+}
+
+function getTaskActualEnd(task: Task) {
+  if ((task.type ?? "task") === "milestone") return getMilestoneActualDate(task);
+  return task.actualEnd;
+}
+
 function calculateScheduleStatus(task: Task, date = new Date()): NonNullable<Task["scheduleStatus"]> {
   const currentStamp = utcDayStamp(date);
   const startStamp = utcDayStamp(task.start);
@@ -112,13 +133,19 @@ function calculateScheduleStatus(task: Task, date = new Date()): NonNullable<Tas
 function getDependencyStatus(
   task: Task,
   taskMap: Map<string, Task>
-): Pick<Task, "dependencyBlocked" | "dependencyViolation"> {
+): Pick<Task, "dependencyBlocked" | "dependencyViolation" | "dependencyActualViolation" | "dependencyMissing"> {
   let dependencyBlocked = false;
   let dependencyViolation = false;
+  let dependencyActualViolation = false;
+  let dependencyMissing = false;
 
   normalizeDependencies(task.dependencies).forEach((dependency) => {
     const predecessor = taskMap.get(dependency.taskId);
-    if (!predecessor) return;
+    if (!predecessor) {
+      dependencyMissing = true;
+      dependencyViolation = true;
+      return;
+    }
 
     if (dependency.type === "FS" && predecessor.progress < 100 && task.progress > 0) {
       dependencyBlocked = true;
@@ -132,9 +159,53 @@ function getDependencyStatus(
     if (dependency.type === "FF" && predecessor.progress < 100 && task.progress >= 100) {
       dependencyViolation = true;
     }
+
+    if (dependency.type === "FS" && task.start.getTime() < predecessor.end.getTime()) {
+      dependencyViolation = true;
+    }
+
+    if (dependency.type === "SS" && task.start.getTime() < predecessor.start.getTime()) {
+      dependencyViolation = true;
+    }
+
+    if (dependency.type === "FF" && task.end.getTime() < predecessor.end.getTime()) {
+      dependencyViolation = true;
+    }
+
+    const taskActualStart = getTaskActualStart(task);
+    const taskActualEnd = getTaskActualEnd(task);
+    const predecessorActualStart = getTaskActualStart(predecessor);
+    const predecessorActualEnd = getTaskActualEnd(predecessor);
+
+    if (
+      dependency.type === "FS" &&
+      taskActualStart &&
+      (!predecessorActualEnd || taskActualStart.getTime() < predecessorActualEnd.getTime())
+    ) {
+      dependencyActualViolation = true;
+      dependencyViolation = true;
+    }
+
+    if (
+      dependency.type === "SS" &&
+      taskActualStart &&
+      (!predecessorActualStart || taskActualStart.getTime() < predecessorActualStart.getTime())
+    ) {
+      dependencyActualViolation = true;
+      dependencyViolation = true;
+    }
+
+    if (
+      dependency.type === "FF" &&
+      taskActualEnd &&
+      (!predecessorActualEnd || taskActualEnd.getTime() < predecessorActualEnd.getTime())
+    ) {
+      dependencyActualViolation = true;
+      dependencyViolation = true;
+    }
   });
 
-  return { dependencyBlocked, dependencyViolation };
+  return { dependencyBlocked, dependencyViolation, dependencyActualViolation, dependencyMissing };
 }
 
 function hasUnmetDependenciesForMilestone(tasks: Task[], milestone: Task) {
@@ -239,6 +310,8 @@ function normalizeTask(task: Task): Task {
   const type = task.type ?? DEFAULT_TASK_TYPE;
   const start = new Date(task.start);
   const end = type === "milestone" ? new Date(start) : new Date(task.end);
+  const actualStart = task.actualStart ? new Date(task.actualStart) : undefined;
+  const actualEnd = task.actualEnd ? new Date(task.actualEnd) : undefined;
   const milestoneStatus = type === "milestone" ? task.milestoneStatus ?? DEFAULT_MILESTONE_STATUS : undefined;
   const progress = milestoneStatus === "passed" ? 100 : task.progress;
 
@@ -246,6 +319,8 @@ function normalizeTask(task: Task): Task {
     ...task,
     start,
     end,
+    actualStart,
+    actualEnd,
     parentId: task.parentId ?? DEFAULT_PARENT_ID,
     dependencies: normalizeDependencies(task.dependencies),
     type,
@@ -258,6 +333,8 @@ function normalizeTask(task: Task): Task {
     scheduleStatus: calculateScheduleStatus({ ...task, start, end, type, progress, milestoneStatus }),
     dependencyBlocked: false,
     dependencyViolation: false,
+    dependencyActualViolation: false,
+    dependencyMissing: false,
     isMilestoneOverdue: false,
   };
 }
@@ -450,7 +527,17 @@ export function buildUpdatedTasks(prev: Task[], id: string, input: TaskInput) {
     return null;
   }
 
-  const nextTask = normalizeTask({ ...current, ...input, parentId: nextParentId });
+  const isPassedMilestone =
+    (input.type ?? current.type ?? "task") === "milestone" &&
+    current.milestoneStatus === "passed";
+  const passDate = isPassedMilestone ? input.actualEnd ?? input.actualStart ?? current.actualEnd : undefined;
+  const mergedTask = { ...current, ...input, parentId: nextParentId };
+  const nextTask = normalizeTask({
+    ...mergedTask,
+    actualStart: passDate ?? mergedTask.actualStart,
+    actualEnd: passDate ?? mergedTask.actualEnd,
+    passedAt: passDate ? passDate.toISOString() : mergedTask.passedAt,
+  });
   if (hasInvalidDependencies(prev, id, nextTask.dependencies ?? [])) {
     return null;
   }
@@ -461,7 +548,15 @@ export function buildUpdatedTasks(prev: Task[], id: string, input: TaskInput) {
 export function calculateParentSummary(tasks: Task[]) {
   const byId = new Map(tasks.map((task) => [task.id, task]));
   const childrenMap = buildChildrenMap(tasks);
-  const memo = new Map<string, { start: Date; end: Date; progress: number }>();
+  type SummaryInfo = {
+    start: Date;
+    end: Date;
+    actualStart?: Date;
+    actualEnd?: Date;
+    progress: number;
+    isComplete: boolean;
+  };
+  const memo = new Map<string, SummaryInfo>();
   const visiting = new Set<string>();
 
   const durationWeight = (start: Date, end: Date) => {
@@ -469,20 +564,34 @@ export function calculateParentSummary(tasks: Task[]) {
     return diff > 0 ? diff : 1;
   };
 
-  const computeSummary = (taskId: string): { start: Date; end: Date; progress: number } => {
+  const getLeafSummary = (task: Task): SummaryInfo => {
+    const isMilestone = (task.type ?? "task") === "milestone";
+    const milestoneActualDate = getMilestoneActualDate(task);
+
+    return {
+      start: task.start,
+      end: task.end,
+      actualStart: isMilestone ? milestoneActualDate : task.actualStart,
+      actualEnd: isMilestone ? milestoneActualDate : task.actualEnd,
+      progress: task.progress,
+      isComplete: isMilestone ? task.milestoneStatus === "passed" : task.progress >= 100,
+    };
+  };
+
+  const computeSummary = (taskId: string): SummaryInfo => {
     if (memo.has(taskId)) return memo.get(taskId)!;
     const task = byId.get(taskId);
     if (!task) {
-      return { start: new Date(), end: new Date(), progress: 0 };
+      return { start: new Date(), end: new Date(), progress: 0, isComplete: false };
     }
 
     if (visiting.has(taskId)) {
-      return { start: task.start, end: task.end, progress: task.progress };
+      return getLeafSummary(task);
     }
 
     const children = childrenMap.get(taskId);
     if (!children || children.length === 0) {
-      const leaf = { start: task.start, end: task.end, progress: task.progress };
+      const leaf = getLeafSummary(task);
       memo.set(taskId, leaf);
       return leaf;
     }
@@ -490,6 +599,10 @@ export function calculateParentSummary(tasks: Task[]) {
     visiting.add(taskId);
     let minStart: Date | null = null;
     let maxEnd: Date | null = null;
+    let minActualStart: Date | null = null;
+    let maxActualEnd: Date | null = null;
+    let allChildrenComplete = true;
+    let allCompletedChildrenHaveActualEnd = true;
     let totalWeight = 0;
     let weightedSum = 0;
 
@@ -500,6 +613,24 @@ export function calculateParentSummary(tasks: Task[]) {
       if (!minStart || childSummary.start < minStart) minStart = childSummary.start;
       if (!maxEnd || childSummary.end > maxEnd) maxEnd = childSummary.end;
 
+      if (!childSummary.isComplete) {
+        allChildrenComplete = false;
+      }
+
+      if (childSummary.actualStart) {
+        if (!minActualStart || childSummary.actualStart < minActualStart) {
+          minActualStart = childSummary.actualStart;
+        }
+      }
+
+      if (childSummary.isComplete) {
+        if (!childSummary.actualEnd) {
+          allCompletedChildrenHaveActualEnd = false;
+        } else if (!maxActualEnd || childSummary.actualEnd > maxActualEnd) {
+          maxActualEnd = childSummary.actualEnd;
+        }
+      }
+
       const weight = durationWeight(childSummary.start, childSummary.end);
       totalWeight += weight;
       weightedSum += childSummary.progress * weight;
@@ -507,9 +638,14 @@ export function calculateParentSummary(tasks: Task[]) {
 
     const start = minStart ?? task.start;
     const end = maxEnd ?? task.end;
+    const actualStart = minActualStart ?? undefined;
     const progress = totalWeight > 0 ? weightedSum / totalWeight : task.progress;
+    const isComplete = allChildrenComplete && progress >= 100;
+    const actualEnd = actualStart && isComplete && allCompletedChildrenHaveActualEnd
+      ? maxActualEnd ?? undefined
+      : undefined;
 
-    const summary = { start, end, progress };
+    const summary = { start, end, actualStart, actualEnd, progress, isComplete };
     memo.set(taskId, summary);
     visiting.delete(taskId);
     return summary;
@@ -523,11 +659,20 @@ export function calculateParentSummary(tasks: Task[]) {
     const summary = computeSummary(task.id);
     const startChanged = task.start.getTime() !== summary.start.getTime();
     const endChanged = task.end.getTime() !== summary.end.getTime();
+    const actualStartChanged = (task.actualStart?.getTime() ?? null) !== (summary.actualStart?.getTime() ?? null);
+    const actualEndChanged = (task.actualEnd?.getTime() ?? null) !== (summary.actualEnd?.getTime() ?? null);
     const progressChanged = Math.abs(task.progress - summary.progress) > 0.0001;
 
-    if (!startChanged && !endChanged && !progressChanged) return task;
+    if (!startChanged && !endChanged && !actualStartChanged && !actualEndChanged && !progressChanged) return task;
     changed = true;
-    return { ...task, start: summary.start, end: summary.end, progress: summary.progress };
+    return {
+      ...task,
+      start: summary.start,
+      end: summary.end,
+      actualStart: summary.actualStart,
+      actualEnd: summary.actualEnd,
+      progress: summary.progress,
+    };
   });
 
   return changed ? next : tasks;
@@ -770,12 +915,12 @@ export function useTasks() {
         if (task.id !== id || (task.type ?? "task") !== "milestone") return task;
 
         if (task.milestoneStatus === "passed") {
-          return normalizeTask({
-            ...task,
-            milestoneStatus: getUnpassedMilestoneStatus(task),
-            passedAt: undefined,
-            progress: 0,
-          });
+        return normalizeTask({
+          ...task,
+          milestoneStatus: getUnpassedMilestoneStatus(task),
+          passedAt: undefined,
+          progress: 0,
+        });
         }
 
         if (!options?.force && hasUnmetDependenciesForMilestone(prev, task)) {
@@ -786,6 +931,8 @@ export function useTasks() {
           ...task,
           milestoneStatus: "passed",
           passedAt: new Date().toISOString(),
+          actualEnd: new Date(),
+          actualStart: task.actualStart ?? new Date(),
           progress: 100,
         });
       })

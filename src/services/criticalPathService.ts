@@ -69,10 +69,14 @@ function collectDescendants(childrenMap: Map<string, string[]>, rootId: string) 
   return result;
 }
 
-function normalizeDependencies(dependencies: Task["dependencies"]): TaskDependency[] {
+function normalizeDependencies(dependencies: Task["dependencies"] | Array<string | TaskDependency> | undefined): TaskDependency[] {
   if (!Array.isArray(dependencies)) return [];
 
-  return dependencies.flatMap((dependency) => {
+  return dependencies.flatMap<TaskDependency>((dependency) => {
+    if (typeof dependency === "string") {
+      return dependency ? [{ taskId: dependency, type: "FS" as const }] : [];
+    }
+
     if (
       !dependency ||
       typeof dependency !== "object" ||

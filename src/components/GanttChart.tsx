@@ -97,6 +97,7 @@ type DependencyOverlayLayout = {
   width: number;
   height: number;
   paths: DependencyPath[];
+  actualBars: ActualBarOverlay[];
   localCriticalRects: OverlayRect[];
   milestones: MilestoneOverlay[];
 };
@@ -116,6 +117,18 @@ type MilestoneOverlay = {
   isLocalCritical: boolean;
 };
 
+type ActualBarOverlay = {
+  id: string;
+  normalRect?: OverlayRect;
+  overdueRect?: OverlayRect;
+  milestoneRect?: OverlayRect;
+  isMilestone?: boolean;
+  isOverdue?: boolean;
+  isOpen: boolean;
+  tooltip: string;
+  delayDays: number;
+};
+
 type ProjectHealthStats = {
   totalTasks: number;
   inProgress: number;
@@ -128,6 +141,8 @@ type ProjectHealthStats = {
 
 type DependencyIssue = {
   key: string;
+  category: "missing" | "plan" | "progress" | "actual";
+  categoryLabel: string;
   predecessorName: string;
   dependencyType: TaskDependency["type"];
   description: string;
@@ -140,6 +155,12 @@ type DependencyPopoverState = {
 };
 
 type StatusHelpPopoverState = {
+  left: number;
+  top: number;
+};
+
+type ActualTooltipState = {
+  taskId: string;
   left: number;
   top: number;
 };
@@ -169,6 +190,12 @@ const RANGE_EXTENDER_TASK_ID = "__gantt-range-extender__";
 const MILESTONE_DIAMOND_SIZE = 16;
 const MILESTONE_BAR_HEIGHT = 18;
 const MILESTONE_LABEL_OFFSET = 12;
+const PLAN_BAR_FILL = 48;
+const DUAL_TRACK_PLAN_BAR_FILL = 34;
+const ACTUAL_BAR_HEIGHT_RATIO = 0.52;
+const ACTUAL_BAR_GAP = 4;
+const ACTUAL_BAR_MIN_WIDTH = 8;
+const ACTUAL_MILESTONE_SIZE = 12;
 const DATE_FORMAT_OPTIONS: Intl.DateTimeFormatOptions = {
   year: "numeric",
   month: "2-digit",
@@ -232,54 +259,302 @@ function getTaskDisplayStatus(task: Task): TaskDisplayStatus {
   };
 }
 
+function getActualDeviationText(task: Task) {
+  const messages: string[] = [];
+
+  if (task.actualStart) {
+    const startDiff = Math.round((utcDayStamp(task.actualStart) - utcDayStamp(task.start)) / MS_PER_DAY);
+    if (startDiff > 0) {
+      messages.push(`晚开始 ${startDiff} 天`);
+    }
+  }
+
+  if (task.actualEnd) {
+    const endDiff = Math.round((utcDayStamp(task.actualEnd) - utcDayStamp(task.end)) / MS_PER_DAY);
+    if (endDiff > 0) {
+      messages.push(`实际延期 ${endDiff} 天`);
+    } else if (endDiff < 0) {
+      messages.push(`提前 ${Math.abs(endDiff)} 天`);
+    }
+  }
+
+  return messages.length > 0 ? messages.join("；") : undefined;
+}
+
+function getStartDeviationText(task: Task) {
+  if (!task.actualStart) return null;
+  const startDiff = Math.round((utcDayStamp(task.actualStart) - utcDayStamp(task.start)) / MS_PER_DAY);
+  if (startDiff > 0) return `晚开始 ${startDiff} 天`;
+  if (startDiff < 0) return `提前开始 ${Math.abs(startDiff)} 天`;
+  return "按计划开始";
+}
+
+function getEndDeviationText(task: Task, date = new Date()) {
+  const isMilestone = (task.type ?? "task") === "milestone";
+  if (task.actualEnd) {
+    const endDiff = Math.round((utcDayStamp(task.actualEnd) - utcDayStamp(task.end)) / MS_PER_DAY);
+    if (endDiff > 0) return isMilestone ? `延期通过 ${endDiff} 天` : `延期完成 ${endDiff} 天`;
+    if (endDiff < 0) return isMilestone ? `提前通过 ${Math.abs(endDiff)} 天` : `提前完成 ${Math.abs(endDiff)} 天`;
+    return isMilestone ? "按计划通过" : "按计划完成";
+  }
+
+  if (task.actualStart && task.progress < 100) {
+    const overdueDays = Math.floor((utcDayStamp(date) - utcDayStamp(task.end)) / MS_PER_DAY);
+    if (overdueDays > 0) return `进行中，已超计划 ${overdueDays} 天`;
+  }
+
+  return null;
+}
+
+type ActualTaskLike = {
+  type?: GanttTask["type"] | Task["type"];
+  actualStart?: Date;
+  actualEnd?: Date;
+  milestoneStatus?: Task["milestoneStatus"];
+  passedAt?: string;
+  progress: number;
+  hasChildren?: boolean;
+};
+
+function isSummaryTaskLike(task: ActualTaskLike) {
+  return task.type === "project" || task.hasChildren === true;
+}
+
+function getMilestoneActualDate(task: ActualTaskLike) {
+  if (task.type !== "milestone" || task.milestoneStatus !== "passed") return undefined;
+  if (task.actualEnd) return task.actualEnd;
+  if (task.passedAt) return new Date(task.passedAt);
+  return task.actualStart;
+}
+
+function getTaskActualStart(task: ActualTaskLike) {
+  if (task.type === "milestone") return getMilestoneActualDate(task);
+  return task.actualStart;
+}
+
+function getTaskActualEnd(task: ActualTaskLike) {
+  if (task.type === "milestone") return getMilestoneActualDate(task);
+  if (isSummaryTaskLike(task) && task.progress < 100) return undefined;
+  return task.actualEnd;
+}
+
+function getActualBarTooltip(task: Task, actualEnd: Date, isOpen: boolean) {
+  const delayDays = Math.max(0, Math.round((utcDayStamp(actualEnd) - utcDayStamp(task.end)) / MS_PER_DAY));
+  const lines = [
+    `实际开始：${formatDateYMD(task.actualStart!)}`,
+    `${isOpen ? "进行至今天" : "实际完成"}：${formatDateYMD(actualEnd)}`,
+  ];
+
+  if (delayDays > 0) {
+    lines.push(`是否延期：是`);
+    lines.push(`延期天数：${delayDays} 天`);
+  } else {
+    lines.push("是否延期：否");
+    lines.push("延期天数：0 天");
+  }
+
+  const deviation = getActualDeviationText({ ...task, actualEnd });
+  lines.push(`偏差：${deviation ?? "与计划一致"}`);
+  return lines.join("\n");
+}
+
+function buildActualSegmentRect(x1: number, x2: number, y: number, height: number): OverlayRect | undefined {
+  const left = Math.min(x1, x2);
+  const width = Math.abs(x2 - x1);
+  return {
+    x: left,
+    y,
+    width: Math.max(ACTUAL_BAR_MIN_WIDTH, width),
+    height,
+  };
+}
+
+function getActualBarBounds(bar: ActualBarOverlay): OverlayRect | null {
+  const rects = [bar.normalRect, bar.overdueRect, bar.milestoneRect].filter((rect): rect is OverlayRect => Boolean(rect));
+  if (rects.length === 0) return null;
+  const left = Math.min(...rects.map((rect) => rect.x));
+  const top = Math.min(...rects.map((rect) => rect.y));
+  const right = Math.max(...rects.map((rect) => rect.x + rect.width));
+  const bottom = Math.max(...rects.map((rect) => rect.y + rect.height));
+  return { x: left, y: top, width: right - left, height: bottom - top };
+}
+
 function getDependencyIssues(
   task: Task,
   taskById: Map<string, TaskRow>,
-  options?: { assumeProgress?: number }
+  options?: { assumeProgress?: number; assumeActualStart?: Date; assumeActualEnd?: Date }
 ): DependencyIssue[] {
   const taskProgress = options?.assumeProgress ?? task.progress;
-  const shouldEvaluate = options?.assumeProgress !== undefined || task.dependencyViolation;
-  if (!shouldEvaluate) return [];
+  const taskWithAssumptions = {
+    ...task,
+    actualStart: options?.assumeActualStart ?? task.actualStart,
+    actualEnd: options?.assumeActualEnd ?? task.actualEnd,
+    milestoneStatus:
+      (task.type ?? "task") === "milestone" && options?.assumeActualEnd
+        ? "passed"
+        : task.milestoneStatus,
+  };
+  const taskActualStart = getTaskActualStart(taskWithAssumptions);
+  const taskActualEnd = getTaskActualEnd(taskWithAssumptions);
+  const issues: DependencyIssue[] = [];
+  const getPredecessorName = (predecessor: TaskRow) => {
+    const sameNameCount = Array.from(taskById.values()).filter((item) => item.name === predecessor.name).length;
+    if (sameNameCount <= 1) return predecessor.name;
+    return `${predecessor.name}（${predecessor.id.slice(0, 8)}）`;
+  };
 
-  return (task.dependencies ?? []).flatMap<DependencyIssue>((dependency, index) => {
+  (task.dependencies ?? []).forEach((dependency, index) => {
     const predecessor = taskById.get(dependency.taskId);
-    if (!predecessor) return [];
+    const keyPrefix = `${task.id}-${dependency.taskId}-${dependency.type}-${index}`;
+    if (!predecessor) {
+      issues.push({
+        key: `${keyPrefix}-missing`,
+        category: "missing",
+        categoryLabel: "依赖缺失",
+        predecessorName: `ID ${dependency.taskId}`,
+        dependencyType: dependency.type,
+        description: "前置任务不存在或已被删除，已跳过该依赖匹配",
+      });
+      return;
+    }
 
     if (dependency.type === "FS" && predecessor.progress < 100 && taskProgress > 0) {
-      return [
-        {
-          key: `${task.id}-${dependency.taskId}-${dependency.type}-${index}`,
-          predecessorName: predecessor.name,
-          dependencyType: dependency.type,
-          description: `前置任务尚未完成，但当前任务已经${taskProgress >= 100 ? "完成" : "开始"}`,
-        },
-      ];
+      issues.push({
+        key: `${keyPrefix}-progress`,
+        category: "progress",
+        categoryLabel: "进度状态依赖异常",
+        predecessorName: getPredecessorName(predecessor),
+        dependencyType: dependency.type,
+        description: `前置任务尚未完成，但当前任务已经${taskProgress >= 100 ? "完成" : "开始"}`,
+      });
     }
 
     if (dependency.type === "SS" && predecessor.progress <= 0 && taskProgress > 0) {
-      return [
-        {
-          key: `${task.id}-${dependency.taskId}-${dependency.type}-${index}`,
-          predecessorName: predecessor.name,
-          dependencyType: dependency.type,
-          description: "前置任务尚未开始，但当前任务已经开始",
-        },
-      ];
+      issues.push({
+        key: `${keyPrefix}-progress`,
+        category: "progress",
+        categoryLabel: "进度状态依赖异常",
+        predecessorName: getPredecessorName(predecessor),
+        dependencyType: dependency.type,
+        description: "前置任务尚未开始，但当前任务已经开始",
+      });
     }
 
     if (dependency.type === "FF" && predecessor.progress < 100 && taskProgress >= 100) {
-      return [
-        {
-          key: `${task.id}-${dependency.taskId}-${dependency.type}-${index}`,
-          predecessorName: predecessor.name,
-          dependencyType: dependency.type,
-          description: "前置任务尚未完成，但当前任务已经完成",
-        },
-      ];
+      issues.push({
+        key: `${keyPrefix}-progress`,
+        category: "progress",
+        categoryLabel: "进度状态依赖异常",
+        predecessorName: getPredecessorName(predecessor),
+        dependencyType: dependency.type,
+        description: "前置任务尚未完成，但当前任务已经完成",
+      });
     }
 
-    return [];
+    if (dependency.type === "FS" && task.start.getTime() < predecessor.end.getTime()) {
+      issues.push({
+        key: `${keyPrefix}-plan`,
+        category: "plan",
+        categoryLabel: "计划依赖异常",
+        predecessorName: getPredecessorName(predecessor),
+        dependencyType: dependency.type,
+        description: "计划开始时间早于前置任务计划完成时间",
+      });
+    }
+
+    if (dependency.type === "SS" && task.start.getTime() < predecessor.start.getTime()) {
+      issues.push({
+        key: `${keyPrefix}-plan`,
+        category: "plan",
+        categoryLabel: "计划依赖异常",
+        predecessorName: getPredecessorName(predecessor),
+        dependencyType: dependency.type,
+        description: "计划开始时间早于前置任务计划开始时间",
+      });
+    }
+
+    if (dependency.type === "FF" && task.end.getTime() < predecessor.end.getTime()) {
+      issues.push({
+        key: `${keyPrefix}-plan`,
+        category: "plan",
+        categoryLabel: "计划依赖异常",
+        predecessorName: getPredecessorName(predecessor),
+        dependencyType: dependency.type,
+        description: "计划完成时间早于前置任务计划完成时间",
+      });
+    }
+
+    const predecessorActualStart = getTaskActualStart(predecessor);
+    const predecessorActualEnd = getTaskActualEnd(predecessor);
+
+    if (dependency.type === "FS" && taskActualStart) {
+      if (!predecessorActualEnd) {
+        issues.push({
+          key: `${keyPrefix}-actual-missing-end`,
+          category: "actual",
+          categoryLabel: "实际时间依赖异常",
+          predecessorName: getPredecessorName(predecessor),
+          dependencyType: dependency.type,
+          description: "前置任务尚未记录实际完成时间，当前任务已记录实际开始时间（FS）",
+        });
+      } else if (taskActualStart.getTime() < predecessorActualEnd.getTime()) {
+        issues.push({
+          key: `${keyPrefix}-actual`,
+          category: "actual",
+          categoryLabel: "实际时间依赖异常",
+          predecessorName: getPredecessorName(predecessor),
+          dependencyType: dependency.type,
+          description: "实际开始时间早于前置任务实际完成时间（FS）",
+        });
+      }
+    }
+
+    if (dependency.type === "SS" && taskActualStart) {
+      if (!predecessorActualStart) {
+        issues.push({
+          key: `${keyPrefix}-actual-missing-start`,
+          category: "actual",
+          categoryLabel: "实际时间依赖异常",
+          predecessorName: getPredecessorName(predecessor),
+          dependencyType: dependency.type,
+          description: "前置任务尚未记录实际开始时间，当前任务已记录实际开始时间（SS）",
+        });
+      } else if (taskActualStart.getTime() < predecessorActualStart.getTime()) {
+        issues.push({
+          key: `${keyPrefix}-actual`,
+          category: "actual",
+          categoryLabel: "实际时间依赖异常",
+          predecessorName: getPredecessorName(predecessor),
+          dependencyType: dependency.type,
+          description: "实际开始时间早于前置任务实际开始时间（SS）",
+        });
+      }
+    }
+
+    if (dependency.type === "FF" && taskActualEnd) {
+      if (!predecessorActualEnd) {
+        issues.push({
+          key: `${keyPrefix}-actual-missing-end`,
+          category: "actual",
+          categoryLabel: "实际时间依赖异常",
+          predecessorName: getPredecessorName(predecessor),
+          dependencyType: dependency.type,
+          description: "前置任务尚未记录实际完成时间，当前任务已记录实际完成时间（FF）",
+        });
+      } else if (taskActualEnd.getTime() < predecessorActualEnd.getTime()) {
+        issues.push({
+          key: `${keyPrefix}-actual`,
+          category: "actual",
+          categoryLabel: "实际时间依赖异常",
+          predecessorName: getPredecessorName(predecessor),
+          dependencyType: dependency.type,
+          description: "实际完成时间早于前置任务实际完成时间（FF）",
+        });
+      }
+    }
   });
+
+  return issues;
 }
 
 function isMilestoneAwaitingConfirmation(task: Task) {
@@ -345,6 +620,98 @@ function addMonths(date: Date, months: number) {
   const next = new Date(date);
   next.setMonth(next.getMonth() + months);
   return next;
+}
+
+function getActualDisplayEnd(task: Task & { hasChildren?: boolean }, date = new Date()) {
+  const actualStart = getTaskActualStart(task);
+  if (!actualStart) return null;
+
+  if ((task.type ?? "task") === "milestone") {
+    return getTaskActualEnd(task) ?? null;
+  }
+
+  const actualEnd = getTaskActualEnd(task);
+  if (actualEnd) return actualEnd;
+  if (isSummaryTaskLike(task)) {
+    if (task.progress < 100) return new Date(date.getFullYear(), date.getMonth(), date.getDate());
+    return null;
+  }
+  if (task.progress > 0) {
+    return new Date(date.getFullYear(), date.getMonth(), date.getDate());
+  }
+  return null;
+}
+
+function getTimelineX(date: Date, rangeStart: Date, mode: ViewMode, columnWidth: number) {
+  if (mode === ViewMode.Month) {
+    const wholeMonths =
+      (date.getFullYear() - rangeStart.getFullYear()) * 12 + date.getMonth() - rangeStart.getMonth();
+    const daysInMonth = new Date(date.getFullYear(), date.getMonth() + 1, 0).getDate();
+    const monthFraction = Math.max(0, date.getDate() - 1) / daysInMonth;
+    return (wholeMonths + monthFraction) * columnWidth;
+  }
+
+  const unitMs = mode === ViewMode.Week ? MS_PER_DAY * 7 : MS_PER_DAY;
+  return ((date.getTime() - rangeStart.getTime()) / unitMs) * columnWidth;
+}
+
+function getActualBarOverlayRect(
+  task: TaskRow,
+  rangeStart: Date,
+  viewMode: ViewMode,
+  columnWidth: number,
+  plannedRect: OverlayRect,
+  scrollLeft: number
+): ActualBarOverlay | null {
+  const actualStart = getTaskActualStart(task);
+  if (!actualStart) return null;
+  const actualEnd = getActualDisplayEnd(task);
+  if (!actualEnd || actualEnd < actualStart) return null;
+
+  const startX = getTimelineX(actualStart, rangeStart, viewMode, columnWidth) - scrollLeft;
+  const endX = getTimelineX(actualEnd, rangeStart, viewMode, columnWidth) - scrollLeft;
+  const plannedEndX = getTimelineX(task.end, rangeStart, viewMode, columnWidth) - scrollLeft;
+  const actualHeight = Math.max(8, Math.min(14, plannedRect.height * ACTUAL_BAR_HEIGHT_RATIO));
+  const delayDays = Math.max(0, Math.round((utcDayStamp(actualEnd) - utcDayStamp(task.end)) / MS_PER_DAY));
+  const isOpen = !getTaskActualEnd(task);
+  const rowTop = plannedRect.y + (plannedRect.height - plannedRect.height / DUAL_TRACK_PLAN_BAR_FILL * 100) / 2;
+  const fallbackY = plannedRect.y + plannedRect.height + ACTUAL_BAR_GAP;
+  const laneBottomY = rowTop + plannedRect.height / DUAL_TRACK_PLAN_BAR_FILL * 100;
+  const y = Math.min(fallbackY, laneBottomY - actualHeight - 4);
+
+  if ((task.type ?? "task") === "milestone") {
+    const markerRect = {
+      x: startX - ACTUAL_MILESTONE_SIZE / 2,
+      y: y + actualHeight / 2 - ACTUAL_MILESTONE_SIZE / 2,
+      width: ACTUAL_MILESTONE_SIZE,
+      height: ACTUAL_MILESTONE_SIZE,
+    };
+    return {
+      id: task.id,
+      isOpen: false,
+      isMilestone: true,
+      isOverdue: actualEnd > task.end,
+      tooltip: getActualBarTooltip({ ...task, actualStart, actualEnd }, actualEnd, false),
+      delayDays,
+      milestoneRect: markerRect,
+    };
+  }
+
+  const normalRect = actualStart > task.end
+    ? undefined
+    : buildActualSegmentRect(startX, Math.min(endX, plannedEndX), y, actualHeight);
+  const overdueRect = actualEnd > task.end
+    ? buildActualSegmentRect(Math.max(startX, plannedEndX), endX, y, actualHeight)
+    : undefined;
+
+  return {
+    id: task.id,
+    isOpen,
+    tooltip: getActualBarTooltip({ ...task, actualStart, actualEnd: getTaskActualEnd(task) }, actualEnd, isOpen),
+    delayDays,
+    normalRect,
+    overdueRect,
+  };
 }
 
 function buildDependencyPath(
@@ -720,10 +1087,16 @@ function TaskListTableContent({
         const displayStatus = originalTask
           ? getTaskDisplayStatus(originalTask)
           : ({ label: "—", variant: "none" } satisfies TaskDisplayStatus);
+        const actualDeviationText = originalTask ? getActualDeviationText(originalTask) : undefined;
         const dependencyIssues = originalTask ? getDependencyIssues(originalTask, dependencyTaskById) : [];
+        const assumedMilestonePassDate = new Date();
         const milestonePassIssues =
           originalTask && displayStatus.actionLabel === "确认通过"
-            ? getDependencyIssues(originalTask, dependencyTaskById, { assumeProgress: 100 })
+            ? getDependencyIssues(originalTask, dependencyTaskById, {
+                assumeProgress: 100,
+                assumeActualStart: assumedMilestonePassDate,
+                assumeActualEnd: assumedMilestonePassDate,
+              })
             : [];
         const isDependencyPopoverOpen = Boolean(originalTask && dependencyPopover?.taskId === originalTask.id);
         const nameIndentStyle: CSSProperties = {
@@ -832,7 +1205,10 @@ function TaskListTableContent({
             </div>
             <div className="task-list-cell" style={cellStyle}>
               <div className="milestone-status-cell">
-                <span className={`milestone-status-badge milestone-status-badge--${displayStatus.variant}`}>
+                <span
+                  className={`milestone-status-badge milestone-status-badge--${displayStatus.variant}`}
+                  title={actualDeviationText}
+                >
                   {displayStatus.label}
                 </span>
                 {dependencyIssues.length > 0 && originalTask && (
@@ -927,7 +1303,7 @@ function TaskListTableContent({
             {issues.map((issue) => (
               <div key={issue.key} className="dependency-warning-popover-item">
                 <div className="dependency-warning-popover-line">
-                  与“{issue.predecessorName}”存在 {issue.dependencyType} 依赖
+                  {issue.categoryLabel}：与“{issue.predecessorName}”存在 {issue.dependencyType} 依赖
                 </div>
                 <div className="dependency-warning-popover-desc">{issue.description}</div>
               </div>
@@ -955,7 +1331,7 @@ function TaskListTableContent({
               {pendingMilestonePass.issues.map((issue) => (
                 <div key={issue.key} className="dependency-confirm-issue">
                   <strong>{issue.dependencyType}</strong>
-                  <span>与“{issue.predecessorName}”存在依赖，{issue.description}。</span>
+                  <span>{issue.categoryLabel}：与“{issue.predecessorName}”存在依赖，{issue.description}。</span>
                 </div>
               ))}
             </div>
@@ -1012,6 +1388,30 @@ function TaskListTableContent({
 }
 
 function TooltipContent({ task, fontSize, fontFamily }: TooltipContentProps) {
+  const taskWithActual = task as GanttTask & Partial<Pick<Task, "actualStart" | "actualEnd" | "milestoneStatus" | "passedAt">>;
+  const actualStart = getTaskActualStart(taskWithActual);
+  const actualEnd = getTaskActualEnd(taskWithActual);
+  const hasActualTime = Boolean(actualStart || actualEnd);
+  const isSummaryTask = task.type === "project";
+  const deviationTask = {
+    ...taskWithActual,
+    actualStart,
+    actualEnd,
+    type: task.type === "project" ? "task" : task.type,
+  } as Task;
+  const actualEndLabel = actualEnd
+    ? formatDateYMD(actualEnd)
+    : isSummaryTask && task.progress >= 100
+      ? "未记录"
+      : "进行中 / 未完成";
+  const actualInfo = hasActualTime
+    ? {
+        start: actualStart ? formatDateYMD(actualStart) : "未记录",
+        end: actualEndLabel,
+        startDeviation: getStartDeviationText(deviationTask),
+        endDeviation: getEndDeviationText(deviationTask),
+      }
+    : null;
   const rowStyle: CSSProperties = {
     display: "flex",
     justifyContent: "space-between",
@@ -1030,25 +1430,88 @@ function TooltipContent({ task, fontSize, fontFamily }: TooltipContentProps) {
     borderRadius: 10,
     boxShadow: "0 12px 30px rgba(15, 23, 42, 0.18)",
   };
+  const sectionTitleStyle: CSSProperties = {
+    marginTop: 8,
+    marginBottom: 4,
+    fontSize,
+    fontWeight: 700,
+    color: "#334155",
+  };
+  const dividerStyle: CSSProperties = {
+    marginTop: 8,
+    paddingTop: 8,
+    borderTop: "1px solid #e2e8f0",
+  };
+  const hintStyle: CSSProperties = {
+    marginTop: 4,
+    fontSize: "11px",
+    color: "#64748b",
+  };
 
   return (
     <div style={containerStyle}>
-      <div style={{ fontWeight: 600, marginBottom: 8 }}>{task.name}</div>
-      <div style={rowStyle}>
-        <span>开始时间</span>
-        <span>{formatDateYMD(task.start)}</span>
-      </div>
-      <div style={rowStyle}>
-        <span>结束时间</span>
-        <span>{formatDateYMD(task.end)}</span>
-      </div>
-      <div style={rowStyle}>
-        <span>工期</span>
-        <span>{durationDays} 天</span>
-      </div>
-      <div style={rowStyle}>
-        <span>进度</span>
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 12, fontWeight: 600, marginBottom: 8 }}>
+        <span>{task.name}</span>
         <span>{Math.round(task.progress)}%</span>
+      </div>
+      <div>
+        <div style={sectionTitleStyle}>计划</div>
+        <div style={rowStyle}>
+          <span>开始时间</span>
+          <span>{formatDateYMD(task.start)}</span>
+        </div>
+        <div style={rowStyle}>
+          <span>结束时间</span>
+          <span>{formatDateYMD(task.end)}</span>
+        </div>
+        <div style={rowStyle}>
+          <span>工期</span>
+          <span>{durationDays} 天</span>
+        </div>
+        <div style={rowStyle}>
+          <span>进度</span>
+          <span>{Math.round(task.progress)}%</span>
+        </div>
+      </div>
+      <div style={dividerStyle}>
+        <div style={{ ...sectionTitleStyle, marginTop: 0 }}>实际</div>
+        {actualInfo ? (
+          <>
+            <div style={rowStyle}>
+              <span>开始时间</span>
+              <span>{actualInfo.start}</span>
+            </div>
+            <div style={rowStyle}>
+              <span>完成时间</span>
+              <span>{actualInfo.end}</span>
+            </div>
+            {isSummaryTask && <div style={hintStyle}>由子任务汇总</div>}
+            <div style={sectionTitleStyle}>偏差</div>
+            {actualInfo.startDeviation && (
+              <div style={rowStyle}>
+                <span>开始</span>
+                <span>{actualInfo.startDeviation}</span>
+              </div>
+            )}
+            {actualInfo.endDeviation && (
+              <div style={rowStyle}>
+                <span>完成</span>
+                <span>{actualInfo.endDeviation}</span>
+              </div>
+            )}
+          </>
+        ) : (
+          <>
+            <div style={rowStyle}>
+              <span>实际时间未记录</span>
+            </div>
+            {isSummaryTask && <div style={hintStyle}>由子任务汇总</div>}
+            <div style={sectionTitleStyle}>偏差</div>
+            <div style={rowStyle}>
+              <span>暂无偏差数据</span>
+            </div>
+          </>
+        )}
       </div>
     </div>
   );
@@ -1214,9 +1677,22 @@ function getRequiredRangeEnd(rangeStart: Date, visibleTimelineWidth: number, col
   return addDays(rangeStart, visibleUnits);
 }
 
-function getLatestEnd(tasks: TaskRow[]) {
+function getEarliestStart(tasks: TaskRow[], includeActual = false) {
   if (tasks.length === 0) return null;
-  return tasks.reduce<Date>((latest, task) => (task.end > latest ? task.end : latest), tasks[0].end);
+  return tasks.reduce<Date>((earliest, task) => {
+    const actualStart = includeActual ? getTaskActualStart(task) : undefined;
+    const taskStart = actualStart && actualStart < task.start ? actualStart : task.start;
+    return taskStart < earliest ? taskStart : earliest;
+  }, getTaskActualStart(tasks[0]) && includeActual && getTaskActualStart(tasks[0])! < tasks[0].start ? getTaskActualStart(tasks[0])! : tasks[0].start);
+}
+
+function getLatestEnd(tasks: TaskRow[], includeActual = false) {
+  if (tasks.length === 0) return null;
+  return tasks.reduce<Date>((latest, task) => {
+    const actualEnd = includeActual ? getActualDisplayEnd(task) : null;
+    const taskEnd = actualEnd && actualEnd > task.end ? actualEnd : task.end;
+    return taskEnd > latest ? taskEnd : latest;
+  }, getActualDisplayEnd(tasks[0]) && includeActual && getActualDisplayEnd(tasks[0])! > tasks[0].end ? getActualDisplayEnd(tasks[0])! : tasks[0].end);
 }
 
 function buildTaskRowMap(tasks: TaskRow[]) {
@@ -1353,9 +1829,11 @@ export function GanttChart({
 }: GanttChartProps) {
   const [viewMode, setViewMode] = useState<ViewMode>(ViewMode.Day);
   const [showCriticalPath, setShowCriticalPath] = useState(true);
+  const [showActual, setShowActual] = useState(false);
   const [taskSearch, setTaskSearch] = useState("");
   const [taskFilter, setTaskFilter] = useState<TaskFilterValue>("all");
   const [dependencyOverlay, setDependencyOverlay] = useState<DependencyOverlayLayout | null>(null);
+  const [actualTooltip, setActualTooltip] = useState<ActualTooltipState | null>(null);
   const [ganttWidth, setGanttWidth] = useState(0);
   const ganttContainerRef = useRef<HTMLDivElement | null>(null);
   const horizontalScrollRef = useRef<HTMLDivElement | null>(null);
@@ -1371,6 +1849,8 @@ export function GanttChart({
     [selectedSummaryTaskId]
   );
   const healthStats = useMemo(() => calculateProjectHealthStats(allTasks), [allTasks]);
+  const timelineStart = useMemo(() => getEarliestStart(displayTasks, showActual), [displayTasks, showActual]);
+  const timelineEnd = useMemo(() => getLatestEnd(displayTasks, showActual), [displayTasks, showActual]);
 
   useEffect(() => {
     if (taskFilter === "localCritical" && !selectedSummaryTaskId) {
@@ -1444,18 +1924,14 @@ export function GanttChart({
       };
     });
 
-    const earliestStart = displayTasks.length > 0
-      ? displayTasks.reduce<Date>((earliest, task) => (task.start < earliest ? task.start : earliest), displayTasks[0].start)
-      : null;
-    const latestEnd = getLatestEnd(displayTasks);
     const visibleTimelineWidth = Math.max(0, ganttWidth - TASK_LIST_WIDTH);
 
-    if (!earliestStart || !latestEnd || visibleTimelineWidth <= 0) {
+    if (!timelineStart || !timelineEnd || visibleTimelineWidth <= 0) {
       return mappedTasks;
     }
 
-    const rangeStart = getRangeStart(earliestStart, viewMode, viewConfig.preStepsCount);
-    const generatedRangeEnd = getGeneratedRangeEnd(latestEnd, viewMode);
+    const rangeStart = getRangeStart(timelineStart, viewMode, viewConfig.preStepsCount);
+    const generatedRangeEnd = getGeneratedRangeEnd(timelineEnd, viewMode);
     const requiredRangeEnd = getRequiredRangeEnd(
       rangeStart,
       visibleTimelineWidth,
@@ -1485,7 +1961,17 @@ export function GanttChart({
         },
       },
     ];
-  }, [displayTasks, ganttWidth, showCriticalPath, viewConfig.columnWidth, viewConfig.preStepsCount, viewMode]);
+  }, [
+    displayTasks,
+    ganttWidth,
+    showActual,
+    showCriticalPath,
+    timelineEnd,
+    timelineStart,
+    viewConfig.columnWidth,
+    viewConfig.preStepsCount,
+    viewMode,
+  ]);
 
   const taskById = useMemo(() => new Map(displayTasks.map((task) => [task.id, task])), [displayTasks]);
   const allTaskById = useMemo(() => new Map(allTasks.map((task) => [task.id, task])), [allTasks]);
@@ -1502,9 +1988,13 @@ export function GanttChart({
             name: originalTask.name,
             start: originalTask.start,
             end: originalTask.end,
+            actualStart: originalTask.actualStart,
+            actualEnd: originalTask.actualEnd,
+            milestoneStatus: originalTask.milestoneStatus,
+            passedAt: originalTask.passedAt,
             progress: originalTask.progress,
             type: originalTask.hasChildren ? "project" : (originalTask.type ?? "task"),
-          }}
+          } as GanttTask & Partial<Pick<Task, "actualStart" | "actualEnd" | "milestoneStatus" | "passedAt">>}
         />
       );
     };
@@ -1534,6 +2024,7 @@ export function GanttChart({
       const viewportRect = chartViewport.getBoundingClientRect();
       const barElements = Array.from(chartSvg.querySelectorAll<SVGGElement>("g[tabindex='0']"));
       const barRectById = new Map<string, OverlayRect>();
+      const rawBarRectById = new Map<string, OverlayRect>();
 
       displayTasks.forEach((task, index) => {
         const element = barElements[index];
@@ -1545,6 +2036,7 @@ export function GanttChart({
           width: rect.width,
           height: rect.height,
         };
+        rawBarRectById.set(task.id, rawRect);
         barRectById.set(
           task.id,
           (task.type ?? "task") === "milestone" ? getMilestoneOverlayRect(rawRect) : rawRect
@@ -1585,6 +2077,26 @@ export function GanttChart({
           })
         : [];
 
+      const actualRangeStart = timelineStart
+        ? getRangeStart(timelineStart, viewMode, viewConfig.preStepsCount)
+        : null;
+      const chartScrollLeft = chartViewport instanceof HTMLElement ? chartViewport.scrollLeft : 0;
+      const actualBars = showActual && actualRangeStart
+        ? displayTasks.flatMap<ActualBarOverlay>((task) => {
+            const rawRect = rawBarRectById.get(task.id);
+            if (!rawRect) return [];
+            const actualBar = getActualBarOverlayRect(
+              task,
+              actualRangeStart,
+              viewMode,
+              viewConfig.columnWidth,
+              rawRect,
+              chartScrollLeft
+            );
+            return actualBar ? [actualBar] : [];
+          })
+        : [];
+
       const milestones = displayTasks.flatMap<MilestoneOverlay>((task) => {
         if ((task.type ?? "task") !== "milestone") return [];
         const rect = barRectById.get(task.id);
@@ -1600,7 +2112,7 @@ export function GanttChart({
         ];
       });
 
-      if (paths.length === 0 && localCriticalRects.length === 0 && milestones.length === 0) {
+      if (paths.length === 0 && actualBars.length === 0 && localCriticalRects.length === 0 && milestones.length === 0) {
         setDependencyOverlay(null);
         return;
       }
@@ -1611,6 +2123,7 @@ export function GanttChart({
         width: viewportRect.width,
         height: viewportRect.height,
         paths,
+        actualBars,
         localCriticalRects,
         milestones,
       });
@@ -1653,14 +2166,9 @@ export function GanttChart({
       root.removeEventListener("scroll", handleScroll, true);
       window.removeEventListener("resize", handleScroll);
     };
-  }, [displayTasks, taskById, viewMode, showCriticalPath]);
+  }, [displayTasks, taskById, viewMode, showCriticalPath, showActual, timelineStart, viewConfig.columnWidth, viewConfig.preStepsCount]);
 
-  const earliestStart = useMemo(() => {
-    if (displayTasks.length === 0) return null;
-    return displayTasks.reduce<Date>((earliest, task) => (task.start < earliest ? task.start : earliest), displayTasks[0].start);
-  }, [displayTasks]);
-
-  const viewDate = useMemo(() => getViewDate(earliestStart, viewMode), [earliestStart, viewMode]);
+  const viewDate = useMemo(() => getViewDate(timelineStart, viewMode), [timelineStart, viewMode]);
 
   useEffect(() => {
     if (viewMode !== ViewMode.Day) return undefined;
@@ -1855,6 +2363,14 @@ export function GanttChart({
             <label className="critical-path-toggle">
               <input
                 type="checkbox"
+                checked={showActual}
+                onChange={(event) => setShowActual(event.target.checked)}
+              />
+              <span>显示实际</span>
+            </label>
+            <label className="critical-path-toggle">
+              <input
+                type="checkbox"
                 checked={showCriticalPath}
                 onChange={(event) => setShowCriticalPath(event.target.checked)}
               />
@@ -1896,6 +2412,7 @@ export function GanttChart({
             locale="zh-CN"
             headerHeight={HEADER_HEIGHT}
             columnWidth={viewConfig.columnWidth}
+            barFill={showActual ? DUAL_TRACK_PLAN_BAR_FILL : PLAN_BAR_FILL}
             preStepsCount={viewConfig.preStepsCount}
             TaskListHeader={TaskListHeader}
             TaskListTable={TaskListTable}
@@ -1956,6 +2473,67 @@ export function GanttChart({
                     <path d="M 0 0 L 6 3 L 0 6 z" fill="#f97316" />
                   </marker>
                 </defs>
+                {dependencyOverlay.actualBars.map((bar) => {
+                  const bounds = getActualBarBounds(bar);
+                  return (
+                    <g
+                      key={`actual-bar-${bar.id}`}
+                      className="actual-task-bar-group"
+                      onMouseEnter={() => {
+                        if (!bounds) return;
+                        setActualTooltip({
+                          taskId: bar.id,
+                          left: Math.min(bounds.x + bounds.width + 12, dependencyOverlay.width - 190),
+                          top: Math.max(8, bounds.y - 10),
+                        });
+                      }}
+                      onMouseMove={() => {
+                        if (!bounds) return;
+                        setActualTooltip({
+                          taskId: bar.id,
+                          left: Math.min(bounds.x + bounds.width + 12, dependencyOverlay.width - 190),
+                          top: Math.max(8, bounds.y - 10),
+                        });
+                      }}
+                      onMouseLeave={() => setActualTooltip(null)}
+                    >
+                      {bar.normalRect && (
+                        <rect
+                          x={bar.normalRect.x}
+                          y={bar.normalRect.y}
+                          width={bar.normalRect.width}
+                          height={bar.normalRect.height}
+                          rx="4"
+                          className={bar.isOpen ? "actual-task-bar actual-task-bar--open" : "actual-task-bar"}
+                        />
+                      )}
+                      {bar.overdueRect && (
+                        <rect
+                          x={bar.overdueRect.x}
+                          y={bar.overdueRect.y}
+                          width={bar.overdueRect.width}
+                          height={bar.overdueRect.height}
+                          rx="4"
+                          className={bar.isOpen
+                            ? "actual-task-bar-overdue actual-task-bar-overdue--open"
+                            : "actual-task-bar-overdue"}
+                        />
+                      )}
+                      {bar.milestoneRect && (
+                        <polygon
+                          points={buildDiamondPoints(
+                            bar.milestoneRect.x + bar.milestoneRect.width / 2,
+                            bar.milestoneRect.y + bar.milestoneRect.height / 2,
+                            bar.milestoneRect.width
+                          )}
+                          className={bar.isOverdue
+                            ? "actual-milestone-marker actual-milestone-marker--overdue"
+                            : "actual-milestone-marker"}
+                        />
+                      )}
+                    </g>
+                  );
+                })}
                 {dependencyOverlay.localCriticalRects.map((rect, index) => (
                   <rect
                     key={`local-critical-task-${index}`}
@@ -2038,6 +2616,35 @@ export function GanttChart({
                   </g>
                 ))}
               </svg>
+              {actualTooltip && (() => {
+                const task = taskById.get(actualTooltip.taskId);
+                if (!task) return null;
+                return (
+                  <div
+                    className="actual-tooltip-host"
+                    style={{ left: actualTooltip.left, top: actualTooltip.top }}
+                    onMouseEnter={() => setActualTooltip(actualTooltip)}
+                    onMouseLeave={() => setActualTooltip(null)}
+                  >
+                    <TooltipContent
+                      task={{
+                        id: task.id,
+                        name: task.name,
+                        start: task.start,
+                        end: task.end,
+                        actualStart: task.actualStart,
+                        actualEnd: task.actualEnd,
+                        milestoneStatus: task.milestoneStatus,
+                        passedAt: task.passedAt,
+                        progress: task.progress,
+                        type: task.hasChildren ? "project" : (task.type ?? "task"),
+                      } as GanttTask & Partial<Pick<Task, "actualStart" | "actualEnd" | "milestoneStatus" | "passedAt">>}
+                      fontSize="12px"
+                      fontFamily="inherit"
+                    />
+                  </div>
+                );
+              })()}
             </div>
           )}
         </div>

@@ -7,9 +7,11 @@ const ACTIVE_PROJECT_STORAGE_KEY = "gantt_active_project_id";
 const LEGACY_TASKS_STORAGE_KEY = "gantt_tasks";
 const DEFAULT_PROJECT_NAME = "默认项目";
 
-type StoredTask = Omit<Task, "start" | "end"> & {
+type StoredTask = Omit<Task, "start" | "end" | "actualStart" | "actualEnd"> & {
   start: string;
   end: string;
+  actualStart?: string;
+  actualEnd?: string;
 };
 
 type StoredProject = Omit<Project, "tasks"> & {
@@ -44,6 +46,14 @@ function parseDate(value: string) {
   const [year, month, day] = value.split("-").map(Number);
   if (!year || !month || !day) return null;
   return new Date(year, month - 1, day);
+}
+
+function formatOptionalDate(date?: Date) {
+  return date ? formatDate(date) : undefined;
+}
+
+function parseOptionalDate(value: unknown) {
+  return typeof value === "string" ? parseDate(value) ?? undefined : undefined;
 }
 
 function isDependencyType(value: unknown): value is DependencyType {
@@ -88,6 +98,8 @@ function toStoredTask(task: Task): StoredTask {
     progress: task.progress,
     start: formatDate(task.start),
     end: formatDate(task.end),
+    actualStart: formatOptionalDate(task.actualStart),
+    actualEnd: formatOptionalDate(task.actualEnd),
     parentId: task.parentId ?? null,
     dependencies: (task.dependencies ?? []).map((dependency) => ({
       taskId: dependency.taskId,
@@ -118,6 +130,8 @@ function fromStoredTask(task: LegacyStoredTask): Task | null {
     name: task.name,
     start: parsedStart,
     end: task.type === "milestone" ? parsedStart : parsedEnd,
+    actualStart: parseOptionalDate(task.actualStart),
+    actualEnd: parseOptionalDate(task.actualEnd),
     progress: Math.max(0, Math.min(100, progress)),
     parentId,
     dependencies: normalizeStoredDependencies(task.dependencies),
@@ -137,6 +151,8 @@ function cloneTask(task: Task): Task {
     ...task,
     start: new Date(task.start),
     end: new Date(task.end),
+    actualStart: task.actualStart ? new Date(task.actualStart) : undefined,
+    actualEnd: task.actualEnd ? new Date(task.actualEnd) : undefined,
     parentId: task.parentId ?? null,
     dependencies: (task.dependencies ?? []).map((dependency) => ({ ...dependency })),
     type: task.type ?? "task",
@@ -204,6 +220,8 @@ function cloneTasksWithNewIds(tasks: Task[]) {
       name: task.name,
       start: new Date(task.start),
       end: new Date(task.end),
+      actualStart: task.actualStart ? new Date(task.actualStart) : undefined,
+      actualEnd: task.actualEnd ? new Date(task.actualEnd) : undefined,
       progress: task.progress,
       parentId: nextParentId,
       dependencies: nextDependencies,

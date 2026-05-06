@@ -6,6 +6,8 @@ export type TaskFormData = {
   name: string;
   start: Date;
   end: Date;
+  actualStart?: Date;
+  actualEnd?: Date;
   progress: number;
   parentId: string | null;
   type: NonNullable<Task["type"]>;
@@ -26,6 +28,19 @@ function toInputDate(date: Date) {
   const month = String(date.getMonth() + 1).padStart(2, "0");
   const day = String(date.getDate()).padStart(2, "0");
   return `${year}-${month}-${day}`;
+}
+
+function formatOptionalDate(value: string) {
+  return value || "未记录";
+}
+
+function formatOptionalActualEnd(value: string, hasActualStart: boolean) {
+  return value || (hasActualStart ? "进行中" : "未记录");
+}
+
+function getTaskOptionLabel(task: Task, duplicateNameCount: Map<string, number>) {
+  if ((duplicateNameCount.get(task.name) ?? 0) <= 1) return task.name;
+  return `${task.name}（${task.id.slice(0, 8)}）`;
 }
 
 function parseInputDate(value: string) {
@@ -85,6 +100,8 @@ export function TaskFormModal({ isOpen, mode, initialTask, tasks, onClose, onSub
   const [name, setName] = useState("");
   const [start, setStart] = useState("");
   const [end, setEnd] = useState("");
+  const [actualStart, setActualStart] = useState("");
+  const [actualEnd, setActualEnd] = useState("");
   const [progress, setProgress] = useState(0);
   const [parentId, setParentId] = useState("");
   const [taskType, setTaskType] = useState<NonNullable<Task["type"]>>("task");
@@ -97,12 +114,27 @@ export function TaskFormModal({ isOpen, mode, initialTask, tasks, onClose, onSub
   }, [end, start, taskType]);
 
   useEffect(() => {
+    if (taskType !== "milestone") return;
+    if (actualEnd && actualStart !== actualEnd) {
+      setActualStart(actualEnd);
+    }
+  }, [actualEnd, actualStart, taskType]);
+
+  useEffect(() => {
     if (!isOpen) return;
 
     if (initialTask) {
+      const milestoneActualDate =
+        (initialTask.type ?? "task") === "milestone" &&
+        initialTask.milestoneStatus === "passed" &&
+        initialTask.passedAt
+          ? new Date(initialTask.passedAt)
+          : undefined;
       setName(initialTask.name);
       setStart(toInputDate(initialTask.start));
       setEnd(toInputDate(initialTask.end));
+      setActualStart(initialTask.actualStart ? toInputDate(initialTask.actualStart) : milestoneActualDate ? toInputDate(milestoneActualDate) : "");
+      setActualEnd(initialTask.actualEnd ? toInputDate(initialTask.actualEnd) : milestoneActualDate ? toInputDate(milestoneActualDate) : "");
       setProgress(initialTask.progress);
       setParentId(initialTask.parentId ?? "");
       setTaskType(initialTask.type ?? "task");
@@ -119,6 +151,8 @@ export function TaskFormModal({ isOpen, mode, initialTask, tasks, onClose, onSub
     setName("");
     setStart(toInputDate(defaults.start));
     setEnd(toInputDate(defaults.end));
+    setActualStart("");
+    setActualEnd("");
     setProgress(0);
     setParentId("");
     setTaskType("task");
@@ -136,6 +170,13 @@ export function TaskFormModal({ isOpen, mode, initialTask, tasks, onClose, onSub
     () => tasks.filter((task) => !disallowedParentIds.has(task.id)),
     [tasks, disallowedParentIds]
   );
+  const duplicateNameCount = useMemo(() => {
+    const count = new Map<string, number>();
+    tasks.forEach((task) => {
+      count.set(task.name, (count.get(task.name) ?? 0) + 1);
+    });
+    return count;
+  }, [tasks]);
 
   const isParentWithChildren = useMemo(() => {
     if (!initialTask) return false;
@@ -144,9 +185,12 @@ export function TaskFormModal({ isOpen, mode, initialTask, tasks, onClose, onSub
 
   const parsedStart = useMemo(() => parseInputDate(start), [start]);
   const parsedEnd = useMemo(() => parseInputDate(end), [end]);
+  const parsedActualStart = useMemo(() => parseInputDate(actualStart), [actualStart]);
+  const parsedActualEnd = useMemo(() => parseInputDate(actualEnd), [actualEnd]);
   const trimmedName = name.trim();
   const isMilestone = taskType === "milestone";
   const isDateRangeInvalid = !isMilestone && !!(parsedStart && parsedEnd && parsedStart > parsedEnd);
+  const isActualDateRangeInvalid = !!(parsedActualStart && parsedActualEnd && parsedActualEnd < parsedActualStart);
   const dependencyOptions = useMemo(
     () => tasks.filter((task) => task.id !== initialTask?.id),
     [tasks, initialTask]
@@ -169,7 +213,12 @@ export function TaskFormModal({ isOpen, mode, initialTask, tasks, onClose, onSub
       ? "当前依赖关系会形成循环依赖，请重新选择。"
       : null;
   const isSubmitDisabled =
-    trimmedName.length === 0 || !parsedStart || !parsedEnd || isDateRangeInvalid || Boolean(dependencyError);
+    trimmedName.length === 0 ||
+    !parsedStart ||
+    !parsedEnd ||
+    isDateRangeInvalid ||
+    isActualDateRangeInvalid ||
+    Boolean(dependencyError);
 
   if (!isOpen) return null;
 
@@ -197,10 +246,47 @@ export function TaskFormModal({ isOpen, mode, initialTask, tasks, onClose, onSub
           onSubmit={(event) => {
             event.preventDefault();
             if (!parsedStart || !parsedEnd || isSubmitDisabled) return;
+            const today = parseInputDate(toInputDate(new Date()))!;
+            let nextActualStart = parsedActualStart ?? undefined;
+            let nextActualEnd = parsedActualEnd ?? undefined;
+
+            if (isParentWithChildren && progress < 100) {
+              nextActualEnd = undefined;
+            }
+
+            if (isMilestone && initialTask?.milestoneStatus === "passed") {
+              const passDate = nextActualEnd ?? nextActualStart;
+              if (!passDate) {
+                window.alert("已通过的里程碑需要填写实际通过时间。");
+                return;
+              }
+              nextActualStart = passDate;
+              nextActualEnd = passDate;
+            }
+
+            if (!isParentWithChildren && progress > 0 && !nextActualStart) {
+              const useToday = window.confirm("当前进度已大于 0%，但实际开始时间为空。是否默认使用今天作为实际开始时间？");
+              if (!useToday) return;
+              nextActualStart = today;
+            }
+
+            if (!isParentWithChildren && progress >= 100 && !nextActualEnd) {
+              const useToday = window.confirm("当前进度已达到 100%，但实际完成时间为空。是否默认使用今天作为实际完成时间？");
+              if (!useToday) return;
+              nextActualEnd = today;
+            }
+
+            if (!isParentWithChildren && progress < 100 && nextActualEnd) {
+              const keepActualEnd = window.confirm("当前任务尚未 100% 完成，但已填写实际完成时间。是否继续保存？");
+              if (!keepActualEnd) return;
+            }
+
             onSubmit({
               name: trimmedName,
               start: parsedStart,
               end: isMilestone ? parsedStart : parsedEnd,
+              actualStart: nextActualStart,
+              actualEnd: nextActualEnd,
               progress,
               parentId: parentId ? parentId : null,
               type: taskType,
@@ -268,19 +354,59 @@ export function TaskFormModal({ isOpen, mode, initialTask, tasks, onClose, onSub
           </label>
           <div className="task-form-row">
             <label className="task-form-field">
+              <span>{isMilestone ? "实际通过时间" : "实际开始时间"}</span>
+              {isParentWithChildren ? (
+                <div className="task-form-static">
+                  <span>{formatOptionalDate(actualStart)}</span>
+                  <span className="task-form-hint">由子任务汇总</span>
+                </div>
+              ) : (
+                <input
+                  className="task-form-input"
+                  type="date"
+                  value={actualStart}
+                  onChange={(event) => {
+                    setActualStart(event.target.value);
+                    if (isMilestone) setActualEnd(event.target.value);
+                  }}
+                />
+              )}
+            </label>
+            <label className="task-form-field">
+              <span>{isMilestone ? "实际完成时间（同步通过时间）" : "实际完成时间"}</span>
+              {isParentWithChildren ? (
+                <div className="task-form-static">
+                  <span>{formatOptionalActualEnd(progress < 100 ? "" : actualEnd, Boolean(actualStart))}</span>
+                  <span className="task-form-hint">由子任务汇总</span>
+                </div>
+              ) : (
+                <input
+                  className="task-form-input"
+                  type="date"
+                  value={actualEnd}
+                  onChange={(event) => {
+                    setActualEnd(event.target.value);
+                    if (isMilestone) setActualStart(event.target.value);
+                  }}
+                />
+              )}
+            </label>
+          </div>
+          <div className="task-form-row">
+            <label className="task-form-field">
               <span>父任务</span>
               <select
                 className="task-form-input"
                 value={parentId}
                 onChange={(event) => setParentId(event.target.value)}
               >
-                <option value="">无</option>
-                {parentOptions.map((task) => (
-                  <option key={task.id} value={task.id}>
-                    {task.name}
-                  </option>
-                ))}
-              </select>
+                  <option value="">无</option>
+                  {parentOptions.map((task) => (
+                    <option key={task.id} value={task.id}>
+                      {getTaskOptionLabel(task, duplicateNameCount)}
+                    </option>
+                  ))}
+                </select>
             </label>
             <label className="task-form-field">
               <span>任务类型</span>
@@ -333,7 +459,7 @@ export function TaskFormModal({ isOpen, mode, initialTask, tasks, onClose, onSub
                       <option value="">选择前置任务</option>
                       {dependencyOptions.map((task) => (
                         <option key={task.id} value={task.id}>
-                          {task.name}
+                          {getTaskOptionLabel(task, duplicateNameCount)}
                         </option>
                       ))}
                     </select>
@@ -375,6 +501,7 @@ export function TaskFormModal({ isOpen, mode, initialTask, tasks, onClose, onSub
             <p className="task-form-hint">里程碑为 0 工期节点，结束时间会自动同步为开始时间。</p>
           )}
           {isDateRangeInvalid && <p className="task-form-error">结束时间不能早于开始时间。</p>}
+          {isActualDateRangeInvalid && <p className="task-form-error">实际完成时间不能早于实际开始时间。</p>}
           {dependencyError && <p className="task-form-error">{dependencyError}</p>}
           <div className="task-form-footer">
             <button type="button" className="secondary-button" onClick={onClose}>
