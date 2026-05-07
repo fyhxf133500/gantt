@@ -96,6 +96,46 @@ const DEPENDENCY_TYPE_OPTIONS: Array<{ value: DependencyType; label: string }> =
   { value: "FF", label: "FF（完成→完成）" },
 ];
 
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
+
+function getDayDiff(current: Date, baseline: Date) {
+  const currentStamp = Date.UTC(current.getFullYear(), current.getMonth(), current.getDate());
+  const baselineStamp = Date.UTC(baseline.getFullYear(), baseline.getMonth(), baseline.getDate());
+  return Math.round((currentStamp - baselineStamp) / MS_PER_DAY);
+}
+
+function getDurationText(startDate: Date | null, endDate: Date | null, isMilestone: boolean) {
+  if (!startDate || !endDate) return "待填写";
+  if (isMilestone) return "0 天";
+  return `${Math.max(0, getDayDiff(endDate, startDate) + 1)} 天`;
+}
+
+function getDeviationMessages(
+  plannedStart: Date | null,
+  plannedEnd: Date | null,
+  actualStartDate: Date | null,
+  actualEndDate: Date | null,
+  isMilestone: boolean
+) {
+  const messages: string[] = [];
+  const hasActualTime = Boolean(actualStartDate || actualEndDate);
+
+  if (plannedStart && actualStartDate && !isMilestone) {
+    const diff = getDayDiff(actualStartDate, plannedStart);
+    if (diff > 0) messages.push(`晚开始 ${diff} 天`);
+    if (diff < 0) messages.push(`提前开始 ${Math.abs(diff)} 天`);
+  }
+
+  if (plannedEnd && actualEndDate) {
+    const diff = getDayDiff(actualEndDate, plannedEnd);
+    if (diff > 0) messages.push(isMilestone ? `延期通过 ${diff} 天` : `延期完成 ${diff} 天`);
+    if (diff < 0) messages.push(isMilestone ? `提前通过 ${Math.abs(diff)} 天` : `提前完成 ${Math.abs(diff)} 天`);
+  }
+
+  if (messages.length > 0) return messages;
+  return hasActualTime ? ["暂无偏差"] : ["实际时间未记录"];
+}
+
 export function TaskFormModal({ isOpen, mode, initialTask, tasks, onClose, onSubmit }: TaskFormModalProps) {
   const [name, setName] = useState("");
   const [start, setStart] = useState("");
@@ -225,6 +265,21 @@ export function TaskFormModal({ isOpen, mode, initialTask, tasks, onClose, onSub
   const title = mode === "edit" ? "编辑任务" : "新建任务";
   const submitLabel = mode === "edit" ? "保存修改" : "创建任务";
   const progressDisplay = Number.isFinite(progress) ? `${progress.toFixed(1)}%` : "0%";
+  const durationText = getDurationText(parsedStart, parsedEnd, isMilestone);
+  const deviationMessages = getDeviationMessages(parsedStart, parsedEnd, parsedActualStart, parsedActualEnd, isMilestone);
+  const deviationSummary = deviationMessages.join(" · ");
+  const hasDependencyWarning = Boolean(
+    initialTask?.dependencyViolation ||
+      initialTask?.dependencyActualViolation ||
+      initialTask?.dependencyMissing ||
+      initialTask?.dependencyBlocked
+  );
+  const milestoneStatusLabel =
+    initialTask?.milestoneStatus === "passed"
+      ? "已通过"
+      : initialTask?.milestoneStatus === "ready"
+        ? "待确认"
+        : "未开始";
 
   return (
     <div className="task-form-overlay" onClick={onClose}>
@@ -294,112 +349,51 @@ export function TaskFormModal({ isOpen, mode, initialTask, tasks, onClose, onSub
             });
           }}
         >
-          <label className="task-form-field">
-            <span>任务名称</span>
-            <input
-              className="task-form-input"
-              value={name}
-              onChange={(event) => setName(event.target.value)}
-              placeholder="请输入任务名称"
-              required
-            />
-          </label>
-          <div className="task-form-row">
-            <label className="task-form-field">
-              <span>开始时间</span>
-              <input
-                className="task-form-input"
-                type="date"
-                value={start}
-                onChange={(event) => {
-                  setStart(event.target.value);
-                  if (taskType === "milestone") {
-                    setEnd(event.target.value);
-                  }
-                }}
-                required
-                disabled={isParentWithChildren}
-              />
-            </label>
-            <label className="task-form-field">
-              <span>结束时间</span>
-              <input
-                className="task-form-input"
-                type="date"
-                value={end}
-                onChange={(event) => setEnd(event.target.value)}
-                required
-                disabled={isParentWithChildren || isMilestone}
-              />
-            </label>
-          </div>
-          <label className="task-form-field">
-            <span>当前进度 (%)</span>
-            {isParentWithChildren ? (
-              <div className="task-form-static">
-                <span>{progressDisplay}</span>
-                <span className="task-form-hint">由子任务自动计算</span>
-              </div>
-            ) : (
-              <input
-                className="task-form-input"
-                type="number"
-                min={0}
-                max={100}
-                step={1}
-                value={progress}
-                onChange={(event) => setProgress(Number(event.target.value))}
-              />
-            )}
-          </label>
-          <div className="task-form-row">
-            <label className="task-form-field">
-              <span>{isMilestone ? "实际通过时间" : "实际开始时间"}</span>
-              {isParentWithChildren ? (
-                <div className="task-form-static">
-                  <span>{formatOptionalDate(actualStart)}</span>
-                  <span className="task-form-hint">由子任务汇总</span>
+          <section className="task-form-section">
+            <div className="task-form-section-heading">
+              <div className="task-form-section-title">基本信息</div>
+              {(isParentWithChildren || isMilestone) && (
+                <div className="task-form-section-meta">
+                  {isParentWithChildren && <span>由子任务汇总</span>}
+                  {isMilestone && <span>节点状态 {milestoneStatusLabel}</span>}
                 </div>
-              ) : (
-                <input
-                  className="task-form-input"
-                  type="date"
-                  value={actualStart}
-                  onChange={(event) => {
-                    setActualStart(event.target.value);
-                    if (isMilestone) setActualEnd(event.target.value);
-                  }}
-                />
               )}
-            </label>
+            </div>
             <label className="task-form-field">
-              <span>{isMilestone ? "实际完成时间（同步通过时间）" : "实际完成时间"}</span>
-              {isParentWithChildren ? (
-                <div className="task-form-static">
-                  <span>{formatOptionalActualEnd(progress < 100 ? "" : actualEnd, Boolean(actualStart))}</span>
-                  <span className="task-form-hint">由子任务汇总</span>
-                </div>
-              ) : (
-                <input
-                  className="task-form-input"
-                  type="date"
-                  value={actualEnd}
-                  onChange={(event) => {
-                    setActualEnd(event.target.value);
-                    if (isMilestone) setActualStart(event.target.value);
-                  }}
-                />
-              )}
-            </label>
-          </div>
-          <div className="task-form-row">
-            <label className="task-form-field">
-              <span>父任务</span>
-              <select
+              <span>任务名称</span>
+              <input
                 className="task-form-input"
-                value={parentId}
-                onChange={(event) => setParentId(event.target.value)}
-              >
+                value={name}
+                onChange={(event) => setName(event.target.value)}
+                placeholder="请输入任务名称"
+                required
+              />
+            </label>
+            <div className="task-form-row">
+              <label className="task-form-field">
+                <span>任务类型</span>
+                <select
+                  className="task-form-input"
+                  value={taskType}
+                  onChange={(event) => {
+                    const nextType = event.target.value as NonNullable<Task["type"]>;
+                    setTaskType(nextType);
+                    if (nextType === "milestone") {
+                      setEnd(start);
+                    }
+                  }}
+                >
+                  <option value="task">普通任务</option>
+                  <option value="milestone">里程碑</option>
+                </select>
+              </label>
+              <label className="task-form-field">
+                <span>父任务</span>
+                <select
+                  className="task-form-input"
+                  value={parentId}
+                  onChange={(event) => setParentId(event.target.value)}
+                >
                   <option value="">无</option>
                   {parentOptions.map((task) => (
                     <option key={task.id} value={task.id}>
@@ -407,28 +401,132 @@ export function TaskFormModal({ isOpen, mode, initialTask, tasks, onClose, onSub
                     </option>
                   ))}
                 </select>
-            </label>
+              </label>
+            </div>
             <label className="task-form-field">
-              <span>任务类型</span>
-              <select
-                className="task-form-input"
-                value={taskType}
-                onChange={(event) => {
-                  const nextType = event.target.value as NonNullable<Task["type"]>;
-                  setTaskType(nextType);
-                  if (nextType === "milestone") {
-                    setEnd(start);
-                  }
-                }}
-              >
-                <option value="task">普通任务</option>
-                <option value="milestone">里程碑</option>
-              </select>
+              <span>当前进度 (%)</span>
+              {isParentWithChildren ? (
+                <div className="task-form-static">
+                  <span>{progressDisplay}</span>
+                </div>
+              ) : (
+                <input
+                  className="task-form-input"
+                  type="number"
+                  min={0}
+                  max={100}
+                  step={1}
+                  value={progress}
+                  onChange={(event) => setProgress(Number(event.target.value))}
+                />
+              )}
             </label>
-          </div>
-          <div className="task-form-field">
+          </section>
+
+          <section className="task-form-section">
+            <div className="task-form-section-heading">
+              <div className="task-form-section-title">计划时间</div>
+              <div className="task-form-section-meta">
+                工期 {durationText}
+                {isParentWithChildren && <span>由子任务汇总</span>}
+              </div>
+            </div>
+            <div className="task-form-row">
+              <label className="task-form-field">
+                <span>计划开始</span>
+                {isParentWithChildren ? (
+                  <div className="task-form-static">
+                    <span>{formatOptionalDate(start)}</span>
+                  </div>
+                ) : (
+                  <input
+                    className="task-form-input"
+                    type="date"
+                    value={start}
+                    onChange={(event) => {
+                      setStart(event.target.value);
+                      if (taskType === "milestone") {
+                        setEnd(event.target.value);
+                      }
+                    }}
+                    required
+                  />
+                )}
+              </label>
+              <label className="task-form-field">
+                <span>计划结束</span>
+                {isParentWithChildren ? (
+                  <div className="task-form-static">
+                    <span>{formatOptionalDate(end)}</span>
+                  </div>
+                ) : (
+                  <input
+                    className="task-form-input"
+                    type="date"
+                    value={end}
+                    onChange={(event) => setEnd(event.target.value)}
+                    required
+                    disabled={isMilestone}
+                  />
+                )}
+              </label>
+            </div>
+          </section>
+
+          <section className="task-form-section">
+            <div className="task-form-section-heading">
+              <div className="task-form-section-title">实际时间</div>
+              <div className="task-form-section-meta">
+                {deviationSummary}
+                {isParentWithChildren && <span>由子任务汇总</span>}
+              </div>
+            </div>
+            <div className="task-form-row">
+              <label className="task-form-field">
+                <span>实际开始时间</span>
+                {isParentWithChildren ? (
+                  <div className="task-form-static">
+                    <span>{formatOptionalDate(actualStart)}</span>
+                  </div>
+                ) : (
+                  <input
+                    className="task-form-input"
+                    type="date"
+                    value={actualStart}
+                    onChange={(event) => {
+                      setActualStart(event.target.value);
+                      if (isMilestone) setActualEnd(event.target.value);
+                    }}
+                  />
+                )}
+              </label>
+              <label className="task-form-field">
+                <span>{isMilestone ? "实际通过时间" : "实际完成时间"}</span>
+                {isParentWithChildren ? (
+                  <div className="task-form-static">
+                    <span>{formatOptionalActualEnd(progress < 100 ? "" : actualEnd, Boolean(actualStart))}</span>
+                  </div>
+                ) : (
+                  <input
+                    className="task-form-input"
+                    type="date"
+                    value={actualEnd}
+                    onChange={(event) => {
+                      setActualEnd(event.target.value);
+                      if (isMilestone) setActualStart(event.target.value);
+                    }}
+                  />
+                )}
+              </label>
+            </div>
+          </section>
+
+          <section className="task-form-section">
             <div className="task-form-section-header">
-              <span>依赖关系</span>
+              <div>
+                <div className="task-form-section-title">依赖关系</div>
+                <p className="task-form-section-desc">维护当前任务的前置任务和依赖类型，不会自动修改任务时间。</p>
+              </div>
               <button
                 type="button"
                 className="secondary-button task-form-add-button"
@@ -439,6 +537,9 @@ export function TaskFormModal({ isOpen, mode, initialTask, tasks, onClose, onSub
                 添加依赖
               </button>
             </div>
+            {hasDependencyWarning && (
+              <div className="task-form-warning">当前任务存在依赖异常，请检查前置任务、计划时间、进度或实际时间。</div>
+            )}
             {dependencyDrafts.length === 0 ? (
               <div className="task-form-empty">暂无依赖，任务将独立执行。</div>
             ) : (
@@ -493,13 +594,7 @@ export function TaskFormModal({ isOpen, mode, initialTask, tasks, onClose, onSub
                 ))}
               </div>
             )}
-          </div>
-          {isParentWithChildren && (
-            <p className="task-form-hint">父任务的起止时间由子任务自动汇总。</p>
-          )}
-          {isMilestone && (
-            <p className="task-form-hint">里程碑为 0 工期节点，结束时间会自动同步为开始时间。</p>
-          )}
+          </section>
           {isDateRangeInvalid && <p className="task-form-error">结束时间不能早于开始时间。</p>}
           {isActualDateRangeInvalid && <p className="task-form-error">实际完成时间不能早于实际开始时间。</p>}
           {dependencyError && <p className="task-form-error">{dependencyError}</p>}
