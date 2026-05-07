@@ -1408,16 +1408,16 @@
 }
 
 .task-form-modal {
-  width: min(520px, 100%);
+  width: min(540px, 100%);
   max-height: calc(100vh - 48px);
   overflow-y: auto;
   background: #ffffff;
   border-radius: 16px;
-  padding: 24px;
+  padding: 20px;
   box-shadow: 0 20px 60px rgba(15, 23, 42, 0.25);
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 14px;
 }
 
 .task-form-header {
@@ -1439,17 +1439,62 @@
   gap: 12px;
 }
 
+.task-form-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  background: #ffffff;
+}
+
+.task-form-section-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.task-form-section-title {
+  color: #0f172a;
+  font-size: 14px;
+  font-weight: 800;
+}
+
+.task-form-section-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  color: #64748b;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.task-form-section-meta span + span {
+  padding-left: 8px;
+  border-left: 1px solid #e2e8f0;
+}
+
+.task-form-section-desc {
+  margin: 4px 0 0;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 .task-form-field {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  font-size: 14px;
+  gap: 5px;
+  font-size: 13px;
   color: #0f172a;
 }
 
 .task-form-section-header {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
 }
@@ -1457,27 +1502,27 @@
 .task-form-row {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
+  gap: 10px;
 }
 
 .task-form-input {
-  padding: 8px 10px;
-  border-radius: 10px;
+  padding: 7px 9px;
+  border-radius: 9px;
   border: 1px solid #cbd5f5;
-  font-size: 14px;
+  font-size: 13px;
   background: #ffffff;
 }
 
 .task-form-dependencies {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 8px;
 }
 
 .task-form-dependency-row {
   display: grid;
   grid-template-columns: minmax(0, 1.6fr) minmax(0, 1.2fr) auto;
-  gap: 10px;
+  gap: 8px;
   align-items: center;
 }
 
@@ -1492,6 +1537,16 @@
   background: #f8fafc;
   color: #64748b;
   font-size: 13px;
+}
+
+.task-form-warning {
+  padding: 10px 12px;
+  border: 1px solid #fed7aa;
+  border-radius: 10px;
+  background: #fff7ed;
+  color: #9a3412;
+  font-size: 12px;
+  line-height: 1.45;
 }
 
 .task-form-error {
@@ -1658,12 +1713,12 @@
   text-align: center;
 }
 .task-form-static {
-  padding: 10px 12px;
-  border-radius: 10px;
+  padding: 8px 10px;
+  border-radius: 9px;
   border: 1px solid #cbd5f5;
   background: #f8fafc;
   color: #0f172a;
-  font-size: 14px;
+  font-size: 13px;
   display: flex;
   align-items: center;
   justify-content: space-between;
