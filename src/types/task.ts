@@ -15,6 +15,8 @@ export interface Task {
   name: string;
   start: Date;
   end: Date;
+  baselineStart?: Date;
+  baselineEnd?: Date;
   actualStart?: Date;
   actualEnd?: Date;
   progress: number;

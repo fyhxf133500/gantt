@@ -12,10 +12,13 @@ export type GanttChartProps = {
   criticalPathError?: string | null;
   selectedSummaryTaskId: string | null;
   localCriticalPathError?: string | null;
+  hasBaseline: boolean;
   onCreateTask: () => void;
   onEditTask: (task: Task) => void;
   onDeleteTask: (task: Task) => void;
   onUpdateTask: (id: string, input: TaskUpdateInput) => boolean;
+  onCaptureBaseline: () => void;
+  onClearBaseline: () => void;
   onToggleExpand: (id: string) => void;
   onMoveTask: (id: string, parentId: string | null, options?: MoveTaskOptions) => void;
   onToggleMilestonePassed: (id: string, options?: { force?: boolean }) => void;
@@ -101,6 +104,7 @@ type DependencyOverlayLayout = {
   height: number;
   summaryBars: SummaryBarOverlay[];
   paths: DependencyPath[];
+  baselineBars: BaselineBarOverlay[];
   actualBars: ActualBarOverlay[];
   globalCriticalRects: OverlayRect[];
   localCriticalRects: OverlayRect[];
@@ -127,6 +131,12 @@ type SummaryBarOverlay = {
   name: string;
   rect: OverlayRect;
   progressWidth: number;
+};
+
+type BaselineBarOverlay = {
+  id: string;
+  rect: OverlayRect;
+  isMilestone: boolean;
 };
 
 type ActualBarOverlay = {
@@ -208,6 +218,8 @@ const ACTUAL_BAR_HEIGHT_RATIO = 0.52;
 const ACTUAL_BAR_GAP = 4;
 const ACTUAL_BAR_MIN_WIDTH = 8;
 const ACTUAL_MILESTONE_SIZE = 12;
+const BASELINE_BAR_HEIGHT = 2;
+const BASELINE_BAR_MIN_WIDTH = 8;
 const DATE_FORMAT_OPTIONS: Intl.DateTimeFormatOptions = {
   year: "numeric",
   month: "2-digit",
@@ -316,6 +328,21 @@ function getEndDeviationText(task: Task, date = new Date()) {
   }
 
   return null;
+}
+
+function getBaselineDeviationText(task: Pick<Task, "start" | "end" | "baselineStart" | "baselineEnd">) {
+  if (!task.baselineStart || !task.baselineEnd) return null;
+
+  const messages: string[] = [];
+  const startDiff = Math.round((utcDayStamp(task.start) - utcDayStamp(task.baselineStart)) / MS_PER_DAY);
+  const endDiff = Math.round((utcDayStamp(task.end) - utcDayStamp(task.baselineEnd)) / MS_PER_DAY);
+
+  if (startDiff > 0) messages.push(`开始推迟 ${startDiff} 天`);
+  if (startDiff < 0) messages.push(`开始提前 ${Math.abs(startDiff)} 天`);
+  if (endDiff > 0) messages.push(`结束推迟 ${endDiff} 天`);
+  if (endDiff < 0) messages.push(`结束提前 ${Math.abs(endDiff)} 天`);
+
+  return messages.length > 0 ? messages.join("；") : "与基线一致";
 }
 
 type ActualTaskLike = {
@@ -628,6 +655,23 @@ function addDays(date: Date, days: number) {
   return next;
 }
 
+function startOfLocalDay(date: Date) {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate());
+}
+
+function snapToNearestDayStart(date: Date) {
+  const dayStart = startOfLocalDay(date);
+  const nextDayStart = addDays(dayStart, 1);
+  const previousDayStart = addDays(dayStart, -1);
+  const candidates = [previousDayStart, dayStart, nextDayStart];
+
+  return candidates.reduce((nearest, candidate) => {
+    const nearestDistance = Math.abs(date.getTime() - nearest.getTime());
+    const candidateDistance = Math.abs(date.getTime() - candidate.getTime());
+    return candidateDistance < nearestDistance ? candidate : nearest;
+  }, dayStart);
+}
+
 function addMonths(date: Date, months: number) {
   const next = new Date(date);
   next.setMonth(next.getMonth() + months);
@@ -652,6 +696,15 @@ function getActualDisplayEnd(task: Task & { hasChildren?: boolean }, date = new 
     return new Date(date.getFullYear(), date.getMonth(), date.getDate());
   }
   return null;
+}
+
+function getDisplayIntervalStart(date: Date, task: Pick<Task, "type"> & { hasChildren?: boolean }) {
+  if ((task.type ?? "task") === "milestone") return date;
+  return addDays(date, -1);
+}
+
+function getDisplayIntervalEnd(date: Date) {
+  return date;
 }
 
 function getTimelineX(date: Date, rangeStart: Date, mode: ViewMode, columnWidth: number) {
@@ -680,9 +733,12 @@ function getActualBarOverlayRect(
   const actualEnd = getActualDisplayEnd(task);
   if (!actualEnd || actualEnd < actualStart) return null;
 
-  const startX = getTimelineX(actualStart, rangeStart, viewMode, columnWidth) - scrollLeft;
-  const endX = getTimelineX(actualEnd, rangeStart, viewMode, columnWidth) - scrollLeft;
-  const plannedEndX = getTimelineX(task.end, rangeStart, viewMode, columnWidth) - scrollLeft;
+  const displayActualStart = getDisplayIntervalStart(actualStart, task);
+  const displayActualEnd = getDisplayIntervalEnd(actualEnd);
+  const displayPlannedEnd = getDisplayIntervalEnd(task.end);
+  const startX = getTimelineX(displayActualStart, rangeStart, viewMode, columnWidth) - scrollLeft;
+  const endX = getTimelineX(displayActualEnd, rangeStart, viewMode, columnWidth) - scrollLeft;
+  const plannedEndX = getTimelineX(displayPlannedEnd, rangeStart, viewMode, columnWidth) - scrollLeft;
   const actualHeight = Math.max(8, Math.min(14, plannedRect.height * ACTUAL_BAR_HEIGHT_RATIO));
   const delayDays = Math.max(0, Math.round((utcDayStamp(actualEnd) - utcDayStamp(task.end)) / MS_PER_DAY));
   const isOpen = !getTaskActualEnd(task);
@@ -723,6 +779,38 @@ function getActualBarOverlayRect(
     delayDays,
     normalRect,
     overdueRect,
+  };
+}
+
+function getBaselineBarOverlayRect(
+  task: TaskRow,
+  rangeStart: Date,
+  viewMode: ViewMode,
+  columnWidth: number,
+  plannedRect: OverlayRect,
+  scrollLeft: number
+): BaselineBarOverlay | null {
+  if (!task.baselineStart || !task.baselineEnd) return null;
+  if (task.baselineEnd < task.baselineStart) return null;
+
+  const isMilestone = (task.type ?? "task") === "milestone";
+  const displayBaselineStart = getDisplayIntervalStart(task.baselineStart, task);
+  const displayBaselineEnd = getDisplayIntervalEnd(task.baselineEnd);
+  const startX = getTimelineX(displayBaselineStart, rangeStart, viewMode, columnWidth) - scrollLeft;
+  const endX = getTimelineX(displayBaselineEnd, rangeStart, viewMode, columnWidth) - scrollLeft;
+  const width = isMilestone ? BASELINE_BAR_MIN_WIDTH : Math.max(BASELINE_BAR_MIN_WIDTH, endX - startX);
+  const x = isMilestone ? startX - width / 2 : startX;
+  const y = Math.max(2, plannedRect.y - 5);
+
+  return {
+    id: task.id,
+    isMilestone,
+    rect: {
+      x,
+      y,
+      width,
+      height: BASELINE_BAR_HEIGHT,
+    },
   };
 }
 
@@ -1403,10 +1491,11 @@ function TaskListTableContent({
 }
 
 function TooltipContent({ task, fontSize, fontFamily }: TooltipContentProps) {
-  const taskWithActual = task as GanttTask & Partial<Pick<Task, "actualStart" | "actualEnd" | "milestoneStatus" | "passedAt">>;
+  const taskWithActual = task as GanttTask & Partial<Pick<Task, "baselineStart" | "baselineEnd" | "actualStart" | "actualEnd" | "milestoneStatus" | "passedAt">>;
   const actualStart = getTaskActualStart(taskWithActual);
   const actualEnd = getTaskActualEnd(taskWithActual);
   const hasActualTime = Boolean(actualStart || actualEnd);
+  const hasBaselineTime = Boolean(taskWithActual.baselineStart && taskWithActual.baselineEnd);
   const isSummaryTask = task.type === "project";
   const deviationTask = {
     ...taskWithActual,
@@ -1427,6 +1516,12 @@ function TooltipContent({ task, fontSize, fontFamily }: TooltipContentProps) {
         endDeviation: getEndDeviationText(deviationTask),
       }
     : null;
+  const baselineDeviationText = getBaselineDeviationText({
+    start: task.start,
+    end: task.end,
+    baselineStart: taskWithActual.baselineStart,
+    baselineEnd: taskWithActual.baselineEnd,
+  });
   const rowStyle: CSSProperties = {
     display: "flex",
     justifyContent: "space-between",
@@ -1487,6 +1582,30 @@ function TooltipContent({ task, fontSize, fontFamily }: TooltipContentProps) {
           <span>进度</span>
           <span>{Math.round(task.progress)}%</span>
         </div>
+      </div>
+      <div style={dividerStyle}>
+        <div style={{ ...sectionTitleStyle, marginTop: 0 }}>基线</div>
+        {hasBaselineTime ? (
+          <>
+            <div style={rowStyle}>
+              <span>基线开始</span>
+              <span>{formatDateYMD(taskWithActual.baselineStart!)}</span>
+            </div>
+            <div style={rowStyle}>
+              <span>基线结束</span>
+              <span>{formatDateYMD(taskWithActual.baselineEnd!)}</span>
+            </div>
+            <div style={rowStyle}>
+              <span>计划偏差</span>
+              <span>{baselineDeviationText}</span>
+            </div>
+            {isSummaryTask && <div style={hintStyle}>由子任务汇总</div>}
+          </>
+        ) : (
+          <div style={rowStyle}>
+            <span>未纳入基线</span>
+          </div>
+        )}
       </div>
       <div style={dividerStyle}>
         <div style={{ ...sectionTitleStyle, marginTop: 0 }}>实际</div>
@@ -1692,22 +1811,60 @@ function getRequiredRangeEnd(rangeStart: Date, visibleTimelineWidth: number, col
   return addDays(rangeStart, visibleUnits);
 }
 
-function getEarliestStart(tasks: TaskRow[], includeActual = false) {
+function getEarliestStart(tasks: TaskRow[], includeActual = false, includeBaseline = false) {
   if (tasks.length === 0) return null;
   return tasks.reduce<Date>((earliest, task) => {
-    const actualStart = includeActual ? getTaskActualStart(task) : undefined;
-    const taskStart = actualStart && actualStart < task.start ? actualStart : task.start;
+    const actualStart = includeActual && getTaskActualStart(task)
+      ? getDisplayIntervalStart(getTaskActualStart(task)!, task)
+      : undefined;
+    const baselineStart = includeBaseline && task.baselineStart
+      ? getDisplayIntervalStart(task.baselineStart, task)
+      : undefined;
+    const taskStart = [getDisplayIntervalStart(task.start, task), actualStart, baselineStart]
+      .filter((date): date is Date => Boolean(date))
+      .reduce((min, date) => (date < min ? date : min), getDisplayIntervalStart(task.start, task));
     return taskStart < earliest ? taskStart : earliest;
-  }, getTaskActualStart(tasks[0]) && includeActual && getTaskActualStart(tasks[0])! < tasks[0].start ? getTaskActualStart(tasks[0])! : tasks[0].start);
+  }, [
+    getDisplayIntervalStart(tasks[0].start, tasks[0]),
+    includeActual && getTaskActualStart(tasks[0])
+      ? getDisplayIntervalStart(getTaskActualStart(tasks[0])!, tasks[0])
+      : undefined,
+    includeBaseline && tasks[0].baselineStart
+      ? getDisplayIntervalStart(tasks[0].baselineStart, tasks[0])
+      : undefined,
+  ]
+    .filter((date): date is Date => Boolean(date))
+    .reduce((min, date) => (date < min ? date : min), getDisplayIntervalStart(tasks[0].start, tasks[0])));
 }
 
-function getLatestEnd(tasks: TaskRow[], includeActual = false) {
+function getLatestEnd(tasks: TaskRow[], includeActual = false, includeBaseline = false) {
   if (tasks.length === 0) return null;
   return tasks.reduce<Date>((latest, task) => {
-    const actualEnd = includeActual ? getActualDisplayEnd(task) : null;
-    const taskEnd = actualEnd && actualEnd > task.end ? actualEnd : task.end;
+    const rawActualEnd = includeActual ? getActualDisplayEnd(task) : null;
+    const actualEnd = rawActualEnd ? getDisplayIntervalEnd(rawActualEnd) : null;
+    const baselineEnd = includeBaseline && task.baselineEnd
+      ? getDisplayIntervalEnd(task.baselineEnd)
+      : undefined;
+    const taskEnd = [getDisplayIntervalEnd(task.end), actualEnd, baselineEnd]
+      .filter((date): date is Date => Boolean(date))
+      .reduce((max, date) => (date > max ? date : max), getDisplayIntervalEnd(task.end));
     return taskEnd > latest ? taskEnd : latest;
-  }, getActualDisplayEnd(tasks[0]) && includeActual && getActualDisplayEnd(tasks[0])! > tasks[0].end ? getActualDisplayEnd(tasks[0])! : tasks[0].end);
+  }, [
+    getDisplayIntervalEnd(tasks[0].end),
+    includeActual && getActualDisplayEnd(tasks[0])
+      ? getDisplayIntervalEnd(getActualDisplayEnd(tasks[0])!)
+      : undefined,
+    includeBaseline && tasks[0].baselineEnd
+      ? getDisplayIntervalEnd(tasks[0].baselineEnd)
+      : undefined,
+  ]
+    .filter((date): date is Date => Boolean(date))
+    .reduce((max, date) => (date > max ? date : max), getDisplayIntervalEnd(tasks[0].end)));
+}
+
+function isSameDay(left: Date | null | undefined, right: Date | null | undefined) {
+  if (!left || !right) return false;
+  return utcDayStamp(left) === utcDayStamp(right);
 }
 
 function buildTaskRowMap(tasks: TaskRow[]) {
@@ -1832,10 +1989,13 @@ export function GanttChart({
   criticalPathError,
   selectedSummaryTaskId,
   localCriticalPathError,
+  hasBaseline,
   onCreateTask,
   onEditTask,
   onDeleteTask,
   onUpdateTask,
+  onCaptureBaseline,
+  onClearBaseline,
   onToggleExpand,
   onMoveTask,
   onToggleMilestonePassed,
@@ -1846,6 +2006,7 @@ export function GanttChart({
   const [displayMode, setDisplayMode] = useState<GanttDisplayMode>("simple");
   const [showCriticalPath, setShowCriticalPath] = useState(false);
   const [showActual, setShowActual] = useState(false);
+  const [showBaseline, setShowBaseline] = useState(false);
   const [taskSearch, setTaskSearch] = useState("");
   const [taskFilter, setTaskFilter] = useState<TaskFilterValue>("all");
   const [dependencyOverlay, setDependencyOverlay] = useState<DependencyOverlayLayout | null>(null);
@@ -1856,6 +2017,7 @@ export function GanttChart({
   const horizontalScrollRef = useRef<HTMLDivElement | null>(null);
   const viewConfig = useMemo(() => getViewConfig(viewMode), [viewMode]);
   const effectiveShowActual = displayMode === "analysis" && showActual;
+  const effectiveShowBaseline = displayMode === "analysis" && showBaseline && hasBaseline;
   const effectiveShowCriticalPath = showCriticalPath;
   const filteredTaskResult = useMemo(
     () => filterTaskRows(tasks, allTasks, taskSearch, taskFilter),
@@ -1868,20 +2030,48 @@ export function GanttChart({
     [selectedSummaryTaskId]
   );
   const healthStats = useMemo(() => calculateProjectHealthStats(allTasks), [allTasks]);
-  const timelineStart = useMemo(() => getEarliestStart(displayTasks, effectiveShowActual), [displayTasks, effectiveShowActual]);
-  const timelineEnd = useMemo(() => getLatestEnd(displayTasks, effectiveShowActual), [displayTasks, effectiveShowActual]);
+  const timelineStart = useMemo(
+    () => getEarliestStart(displayTasks, effectiveShowActual, effectiveShowBaseline),
+    [displayTasks, effectiveShowActual, effectiveShowBaseline]
+  );
+  const timelineEnd = useMemo(
+    () => getLatestEnd(displayTasks, effectiveShowActual, effectiveShowBaseline),
+    [displayTasks, effectiveShowActual, effectiveShowBaseline]
+  );
 
   const handleDisplayModeChange = (mode: GanttDisplayMode) => {
     setDisplayMode(mode);
     if (mode === "simple") {
       setShowActual(false);
       setShowCriticalPath(false);
+      setShowBaseline(false);
       return;
     }
 
     setShowActual(true);
     setShowCriticalPath(true);
+    setShowBaseline(hasBaseline);
   };
+
+  const handleCaptureBaseline = () => {
+    const confirmed = window.confirm("设置基线会用当前计划覆盖已有基线，是否继续？");
+    if (!confirmed) return;
+    onCaptureBaseline();
+    setShowBaseline(true);
+  };
+
+  const handleClearBaseline = () => {
+    const confirmed = window.confirm("确认清除当前项目基线吗？");
+    if (!confirmed) return;
+    onClearBaseline();
+    setShowBaseline(false);
+  };
+
+  useEffect(() => {
+    if (!hasBaseline) {
+      setShowBaseline(false);
+    }
+  }, [hasBaseline]);
 
   useEffect(() => {
     if (taskFilter === "localCritical" && !selectedSummaryTaskId) {
@@ -1916,8 +2106,8 @@ export function GanttChart({
       return {
         id: task.id,
         name: isMilestone ? "" : task.name,
-        start: task.start,
-        end: task.end,
+        start: getDisplayIntervalStart(task.start, task),
+        end: getDisplayIntervalEnd(task.end),
         progress: task.progress,
         type: (isSummary ? "project" : task.type ?? "task") as GanttTask["type"],
         isDisabled: isSummary,
@@ -1964,6 +2154,8 @@ export function GanttChart({
       return mappedTasks;
     }
 
+    const plannedTimelineStart = getEarliestStart(displayTasks, false, false);
+    const plannedTimelineEnd = getLatestEnd(displayTasks, false, false);
     const rangeStart = getRangeStart(timelineStart, viewMode, viewConfig.preStepsCount);
     const generatedRangeEnd = getGeneratedRangeEnd(timelineEnd, viewMode);
     const requiredRangeEnd = getRequiredRangeEnd(
@@ -1972,8 +2164,13 @@ export function GanttChart({
       viewConfig.columnWidth,
       viewMode
     );
+    const rangeEnd = generatedRangeEnd >= requiredRangeEnd ? timelineEnd : requiredRangeEnd;
+    const needsRangeExtender =
+      !isSameDay(timelineStart, plannedTimelineStart) ||
+      !isSameDay(timelineEnd, plannedTimelineEnd) ||
+      generatedRangeEnd < requiredRangeEnd;
 
-    if (generatedRangeEnd >= requiredRangeEnd) {
+    if (!needsRangeExtender) {
       return mappedTasks;
     }
 
@@ -1982,8 +2179,8 @@ export function GanttChart({
       {
         id: RANGE_EXTENDER_TASK_ID,
         name: "",
-        start: requiredRangeEnd,
-        end: requiredRangeEnd,
+        start: timelineStart,
+        end: rangeEnd,
         progress: 0,
         type: "task" as const,
         isDisabled: true,
@@ -2021,13 +2218,15 @@ export function GanttChart({
             name: originalTask.name,
             start: originalTask.start,
             end: originalTask.end,
+            baselineStart: originalTask.baselineStart,
+            baselineEnd: originalTask.baselineEnd,
             actualStart: originalTask.actualStart,
             actualEnd: originalTask.actualEnd,
             milestoneStatus: originalTask.milestoneStatus,
             passedAt: originalTask.passedAt,
             progress: originalTask.progress,
             type: originalTask.hasChildren ? "project" : (originalTask.type ?? "task"),
-          } as GanttTask & Partial<Pick<Task, "actualStart" | "actualEnd" | "milestoneStatus" | "passedAt">>}
+          } as GanttTask & Partial<Pick<Task, "baselineStart" | "baselineEnd" | "actualStart" | "actualEnd" | "milestoneStatus" | "passedAt">>}
         />
       );
     };
@@ -2135,17 +2334,32 @@ export function GanttChart({
           })
         : [];
 
-      const actualRangeStart = timelineStart
+      const overlayRangeStart = timelineStart
         ? getRangeStart(timelineStart, viewMode, viewConfig.preStepsCount)
         : null;
       const chartScrollLeft = chartViewport instanceof HTMLElement ? chartViewport.scrollLeft : 0;
-      const actualBars = effectiveShowActual && actualRangeStart
+      const baselineBars = effectiveShowBaseline && overlayRangeStart
+        ? displayTasks.flatMap<BaselineBarOverlay>((task) => {
+            const rawRect = rawBarRectById.get(task.id);
+            if (!rawRect) return [];
+            const baselineBar = getBaselineBarOverlayRect(
+              task,
+              overlayRangeStart,
+              viewMode,
+              viewConfig.columnWidth,
+              rawRect,
+              chartScrollLeft
+            );
+            return baselineBar ? [baselineBar] : [];
+          })
+        : [];
+      const actualBars = effectiveShowActual && overlayRangeStart
         ? displayTasks.flatMap<ActualBarOverlay>((task) => {
             const rawRect = rawBarRectById.get(task.id);
             if (!rawRect) return [];
             const actualBar = getActualBarOverlayRect(
               task,
-              actualRangeStart,
+              overlayRangeStart,
               viewMode,
               viewConfig.columnWidth,
               rawRect,
@@ -2173,6 +2387,7 @@ export function GanttChart({
       if (
         paths.length === 0 &&
         summaryBars.length === 0 &&
+        baselineBars.length === 0 &&
         actualBars.length === 0 &&
         globalCriticalRects.length === 0 &&
         localCriticalRects.length === 0 &&
@@ -2189,6 +2404,7 @@ export function GanttChart({
         height: viewportRect.height,
         summaryBars,
         paths,
+        baselineBars,
         actualBars,
         globalCriticalRects,
         localCriticalRects,
@@ -2233,7 +2449,17 @@ export function GanttChart({
       root.removeEventListener("scroll", handleScroll, true);
       window.removeEventListener("resize", handleScroll);
     };
-  }, [displayTasks, taskById, viewMode, effectiveShowCriticalPath, effectiveShowActual, timelineStart, viewConfig.columnWidth, viewConfig.preStepsCount]);
+  }, [
+    displayTasks,
+    taskById,
+    viewMode,
+    effectiveShowCriticalPath,
+    effectiveShowActual,
+    effectiveShowBaseline,
+    timelineStart,
+    viewConfig.columnWidth,
+    viewConfig.preStepsCount,
+  ]);
 
   const viewDate = useMemo(() => getViewDate(timelineStart, viewMode), [timelineStart, viewMode]);
 
@@ -2313,8 +2539,10 @@ export function GanttChart({
     if (!originalTask) return false;
     if (originalTask.hasChildren) return false;
     const isMilestone = (originalTask.type ?? "task") === "milestone";
-    const nextStart = updatedTask.start;
-    const nextEnd = isMilestone ? updatedTask.start : updatedTask.end;
+    const snappedDisplayStart = snapToNearestDayStart(updatedTask.start);
+    const snappedDisplayEnd = snapToNearestDayStart(updatedTask.end);
+    const nextStart = isMilestone ? snappedDisplayStart : addDays(snappedDisplayStart, 1);
+    const nextEnd = isMilestone ? snappedDisplayStart : snappedDisplayEnd;
 
     return onUpdateTask(originalTask.id, {
       name: originalTask.name,
@@ -2461,6 +2689,30 @@ export function GanttChart({
             onDisplayModeChange={handleDisplayModeChange}
           />
           <div className="gantt-toolbar-actions">
+            {displayMode === "analysis" && (
+              <div className="baseline-controls" aria-label="基线控制">
+                <button type="button" className="secondary-button baseline-action-button" onClick={handleCaptureBaseline}>
+                  设置基线
+                </button>
+                <button
+                  type="button"
+                  className="secondary-button baseline-action-button"
+                  onClick={handleClearBaseline}
+                  disabled={!hasBaseline}
+                >
+                  清除基线
+                </button>
+                <label className={hasBaseline ? "critical-path-toggle" : "critical-path-toggle critical-path-toggle--muted"}>
+                  <input
+                    type="checkbox"
+                    checked={effectiveShowBaseline}
+                    disabled={!hasBaseline}
+                    onChange={(event) => setShowBaseline(event.target.checked)}
+                  />
+                  <span>显示基线</span>
+                </label>
+              </div>
+            )}
             <label className={displayMode === "simple" ? "critical-path-toggle critical-path-toggle--muted" : "critical-path-toggle"}>
               <input
                 type="checkbox"
@@ -2578,6 +2830,17 @@ export function GanttChart({
                     <path d="M 0 0 L 6 3 L 0 6 z" fill="rgba(249, 115, 22, 0.76)" />
                   </marker>
                 </defs>
+                {dependencyOverlay.baselineBars.map((bar) => (
+                  <rect
+                    key={`baseline-bar-${bar.id}`}
+                    x={bar.rect.x}
+                    y={bar.rect.y}
+                    width={bar.rect.width}
+                    height={bar.rect.height}
+                    rx={bar.isMilestone ? "1" : "2"}
+                    className={bar.isMilestone ? "baseline-task-bar baseline-task-bar--milestone" : "baseline-task-bar"}
+                  />
+                ))}
                 {dependencyOverlay.summaryBars.map((bar) => {
                   const labelX = bar.rect.x + Math.min(Math.max(12, bar.rect.width / 2), Math.max(12, bar.rect.width - 12));
                   const labelY = bar.rect.y + bar.rect.height / 2;
@@ -2799,13 +3062,15 @@ export function GanttChart({
                         name: task.name,
                         start: task.start,
                         end: task.end,
+                        baselineStart: task.baselineStart,
+                        baselineEnd: task.baselineEnd,
                         actualStart: task.actualStart,
                         actualEnd: task.actualEnd,
                         milestoneStatus: task.milestoneStatus,
                         passedAt: task.passedAt,
                         progress: task.progress,
                         type: task.hasChildren ? "project" : (task.type ?? "task"),
-                      } as GanttTask & Partial<Pick<Task, "actualStart" | "actualEnd" | "milestoneStatus" | "passedAt">>}
+                      } as GanttTask & Partial<Pick<Task, "baselineStart" | "baselineEnd" | "actualStart" | "actualEnd" | "milestoneStatus" | "passedAt">>}
                       fontSize="12px"
                       fontFamily="inherit"
                     />
