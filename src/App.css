@@ -486,6 +486,13 @@
   flex-wrap: wrap;
 }
 
+.baseline-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
 .project-health-bar {
   display: flex;
   align-items: center;
@@ -752,6 +759,21 @@
   stroke-linejoin: round;
 }
 
+.baseline-task-bar {
+  fill: #e2e8f0;
+  stroke: #94a3b8;
+  stroke-width: 1;
+  stroke-dasharray: 5 4;
+  opacity: 0.82;
+  vector-effect: non-scaling-stroke;
+  pointer-events: none;
+}
+
+.baseline-task-bar--milestone {
+  fill: #cbd5e1;
+  stroke-dasharray: 3 3;
+}
+
 .dependency-path {
   fill: none;
   stroke: #64748b;
@@ -978,6 +1000,17 @@
   color: #0f172a;
   font-size: 13px;
   cursor: pointer;
+}
+
+.secondary-button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.baseline-action-button {
+  border-color: #dbe3ee;
+  background: #fbfdff;
+  color: #475569;
 }
 
 .danger-button {

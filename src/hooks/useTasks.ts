@@ -97,6 +97,10 @@ function utcDayStamp(date: Date) {
   return Date.UTC(date.getFullYear(), date.getMonth(), date.getDate());
 }
 
+function startOfLocalDay(date: Date) {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate());
+}
+
 function getUnpassedMilestoneStatus(task: Task, date = new Date()): NonNullable<Task["milestoneStatus"]> {
   return utcDayStamp(date) >= utcDayStamp(task.end) ? "ready" : "pending";
 }
@@ -308,8 +312,14 @@ export function checkDependencyConflicts(tasks: Task[]): DependencyConflict[] {
 
 function normalizeTask(task: Task): Task {
   const type = task.type ?? DEFAULT_TASK_TYPE;
-  const start = new Date(task.start);
-  const end = type === "milestone" ? new Date(start) : new Date(task.end);
+  const start = startOfLocalDay(new Date(task.start));
+  const end = type === "milestone" ? new Date(start) : startOfLocalDay(new Date(task.end));
+  const baselineStart = task.baselineStart ? new Date(task.baselineStart) : undefined;
+  const baselineEnd = baselineStart && type === "milestone"
+    ? new Date(baselineStart)
+    : task.baselineEnd
+      ? new Date(task.baselineEnd)
+      : undefined;
   const actualStart = task.actualStart ? new Date(task.actualStart) : undefined;
   const actualEnd = task.actualEnd ? new Date(task.actualEnd) : undefined;
   const milestoneStatus = type === "milestone" ? task.milestoneStatus ?? DEFAULT_MILESTONE_STATUS : undefined;
@@ -319,6 +329,8 @@ function normalizeTask(task: Task): Task {
     ...task,
     start,
     end,
+    baselineStart,
+    baselineEnd,
     actualStart,
     actualEnd,
     parentId: task.parentId ?? DEFAULT_PARENT_ID,
@@ -551,6 +563,8 @@ export function calculateParentSummary(tasks: Task[]) {
   type SummaryInfo = {
     start: Date;
     end: Date;
+    baselineStart?: Date;
+    baselineEnd?: Date;
     actualStart?: Date;
     actualEnd?: Date;
     progress: number;
@@ -571,6 +585,8 @@ export function calculateParentSummary(tasks: Task[]) {
     return {
       start: task.start,
       end: task.end,
+      baselineStart: task.baselineStart,
+      baselineEnd: task.baselineEnd,
       actualStart: isMilestone ? milestoneActualDate : task.actualStart,
       actualEnd: isMilestone ? milestoneActualDate : task.actualEnd,
       progress: task.progress,
@@ -599,6 +615,8 @@ export function calculateParentSummary(tasks: Task[]) {
     visiting.add(taskId);
     let minStart: Date | null = null;
     let maxEnd: Date | null = null;
+    let minBaselineStart: Date | null = null;
+    let maxBaselineEnd: Date | null = null;
     let minActualStart: Date | null = null;
     let maxActualEnd: Date | null = null;
     let allChildrenComplete = true;
@@ -612,6 +630,16 @@ export function calculateParentSummary(tasks: Task[]) {
       const childSummary = computeSummary(childId);
       if (!minStart || childSummary.start < minStart) minStart = childSummary.start;
       if (!maxEnd || childSummary.end > maxEnd) maxEnd = childSummary.end;
+      if (childSummary.baselineStart) {
+        if (!minBaselineStart || childSummary.baselineStart < minBaselineStart) {
+          minBaselineStart = childSummary.baselineStart;
+        }
+      }
+      if (childSummary.baselineEnd) {
+        if (!maxBaselineEnd || childSummary.baselineEnd > maxBaselineEnd) {
+          maxBaselineEnd = childSummary.baselineEnd;
+        }
+      }
 
       if (!childSummary.isComplete) {
         allChildrenComplete = false;
@@ -638,6 +666,8 @@ export function calculateParentSummary(tasks: Task[]) {
 
     const start = minStart ?? task.start;
     const end = maxEnd ?? task.end;
+    const baselineStart = minBaselineStart ?? undefined;
+    const baselineEnd = maxBaselineEnd ?? undefined;
     const actualStart = minActualStart ?? undefined;
     const progress = totalWeight > 0 ? weightedSum / totalWeight : task.progress;
     const isComplete = allChildrenComplete && progress >= 100;
@@ -645,7 +675,7 @@ export function calculateParentSummary(tasks: Task[]) {
       ? maxActualEnd ?? undefined
       : undefined;
 
-    const summary = { start, end, actualStart, actualEnd, progress, isComplete };
+    const summary = { start, end, baselineStart, baselineEnd, actualStart, actualEnd, progress, isComplete };
     memo.set(taskId, summary);
     visiting.delete(taskId);
     return summary;
@@ -659,16 +689,28 @@ export function calculateParentSummary(tasks: Task[]) {
     const summary = computeSummary(task.id);
     const startChanged = task.start.getTime() !== summary.start.getTime();
     const endChanged = task.end.getTime() !== summary.end.getTime();
+    const baselineStartChanged = (task.baselineStart?.getTime() ?? null) !== (summary.baselineStart?.getTime() ?? null);
+    const baselineEndChanged = (task.baselineEnd?.getTime() ?? null) !== (summary.baselineEnd?.getTime() ?? null);
     const actualStartChanged = (task.actualStart?.getTime() ?? null) !== (summary.actualStart?.getTime() ?? null);
     const actualEndChanged = (task.actualEnd?.getTime() ?? null) !== (summary.actualEnd?.getTime() ?? null);
     const progressChanged = Math.abs(task.progress - summary.progress) > 0.0001;
 
-    if (!startChanged && !endChanged && !actualStartChanged && !actualEndChanged && !progressChanged) return task;
+    if (
+      !startChanged &&
+      !endChanged &&
+      !baselineStartChanged &&
+      !baselineEndChanged &&
+      !actualStartChanged &&
+      !actualEndChanged &&
+      !progressChanged
+    ) return task;
     changed = true;
     return {
       ...task,
       start: summary.start,
       end: summary.end,
+      baselineStart: summary.baselineStart,
+      baselineEnd: summary.baselineEnd,
       actualStart: summary.actualStart,
       actualEnd: summary.actualEnd,
       progress: summary.progress,
@@ -830,6 +872,10 @@ export function useTasks() {
   const taskTree = useMemo(() => buildTaskTree(tasksWithCriticalPaths), [tasksWithCriticalPaths]);
   const taskRows = useMemo(() => flattenTasks(taskTree, { respectExpansion: false }), [taskTree]);
   const visibleTasks = useMemo(() => flattenTasks(taskTree), [taskTree]);
+  const hasBaseline = useMemo(
+    () => tasks.some((task) => Boolean(task.baselineStart && task.baselineEnd)),
+    [tasks]
+  );
 
   const addTask = useCallback((input: TaskInput) => {
     setActiveProjectTasks((prev) => buildCreatedTasks(prev, input) ?? prev);
@@ -907,6 +953,32 @@ export function useTasks() {
 
   const replaceTasks = useCallback((nextTasks: Task[]) => {
     setActiveProjectTasks(nextTasks.map(normalizeTask));
+  }, [setActiveProjectTasks]);
+
+  const captureBaseline = useCallback(() => {
+    setActiveProjectTasks((prev) =>
+      prev.map((task) => {
+        const baselineStart = new Date(task.start);
+        const baselineEnd = (task.type ?? "task") === "milestone" ? new Date(task.start) : new Date(task.end);
+        return normalizeTask({
+          ...task,
+          baselineStart,
+          baselineEnd,
+        });
+      })
+    );
+  }, [setActiveProjectTasks]);
+
+  const clearBaseline = useCallback(() => {
+    setActiveProjectTasks((prev) =>
+      prev.map((task) =>
+        normalizeTask({
+          ...task,
+          baselineStart: undefined,
+          baselineEnd: undefined,
+        })
+      )
+    );
   }, [setActiveProjectTasks]);
 
   const toggleMilestonePassed = useCallback((id: string, options?: { force?: boolean }) => {
@@ -1025,6 +1097,7 @@ export function useTasks() {
     selectedSummaryTaskId,
     localCriticalTaskIds: localCriticalPath.criticalTaskIds,
     localCriticalPathError: localCriticalPath.error,
+    hasBaseline,
     addTask,
     updateTask,
     moveTask,
@@ -1038,6 +1111,8 @@ export function useTasks() {
     deleteProject,
     toggleTaskExpanded,
     replaceTasks,
+    captureBaseline,
+    clearBaseline,
     toggleMilestonePassed,
     selectSummaryTask,
     clearSelectedSummaryTask,

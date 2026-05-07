@@ -29,6 +29,7 @@ export function Home() {
     criticalPathError,
     selectedSummaryTaskId,
     localCriticalPathError,
+    hasBaseline,
     projects,
     activeProject,
     activeProjectId,
@@ -44,6 +45,8 @@ export function Home() {
     toggleTaskExpanded,
     toggleMilestonePassed,
     replaceTasks,
+    captureBaseline,
+    clearBaseline,
     selectSummaryTask,
     clearSelectedSummaryTask,
   } = useTasks();
@@ -179,10 +182,13 @@ export function Home() {
           criticalPathError={criticalPathError}
           selectedSummaryTaskId={selectedSummaryTaskId}
           localCriticalPathError={localCriticalPathError}
+          hasBaseline={hasBaseline}
           onCreateTask={handleCreateTask}
           onEditTask={handleEditTask}
           onDeleteTask={handleDeleteTask}
           onUpdateTask={handleUpdateTask}
+          onCaptureBaseline={captureBaseline}
+          onClearBaseline={clearBaseline}
           onToggleExpand={toggleTaskExpanded}
           onMoveTask={moveTask}
           onToggleMilestonePassed={toggleMilestonePassed}

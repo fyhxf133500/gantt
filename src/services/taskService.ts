@@ -6,9 +6,11 @@ const STORAGE_VERSION_KEY = "gantt_tasks_version";
 const CURRENT_STORAGE_VERSION = "3";
 const RESET_ONCE_KEY = "gantt_tasks_reset_v3";
 
-type StoredTask = Omit<Task, "start" | "end" | "actualStart" | "actualEnd"> & {
+type StoredTask = Omit<Task, "start" | "end" | "baselineStart" | "baselineEnd" | "actualStart" | "actualEnd"> & {
   start: string;
   end: string;
+  baselineStart?: string;
+  baselineEnd?: string;
   actualStart?: string;
   actualEnd?: string;
 };
@@ -68,6 +70,8 @@ function toStoredTask(task: Task): StoredTask {
     progress: task.progress,
     start: formatDate(task.start),
     end: formatDate(task.end),
+    baselineStart: formatOptionalDate(task.baselineStart),
+    baselineEnd: formatOptionalDate(task.baselineEnd),
     actualStart: formatOptionalDate(task.actualStart),
     actualEnd: formatOptionalDate(task.actualEnd),
     parentId: task.parentId ?? null,
@@ -141,6 +145,8 @@ function fromStoredTask(task: LegacyStoredTask): Task | null {
     name: task.name,
     start: parsedStart,
     end: type === "milestone" ? parsedStart : parsedEnd,
+    baselineStart: parseOptionalDate(task.baselineStart),
+    baselineEnd: parseOptionalDate(task.baselineEnd),
     actualStart: parseOptionalDate(task.actualStart),
     actualEnd: parseOptionalDate(task.actualEnd),
     progress: Math.max(0, Math.min(100, progress)),
