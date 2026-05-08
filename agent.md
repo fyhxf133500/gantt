@@ -102,6 +102,13 @@
 - 格式：按日期追加到对应 `Added / Changed / Fixed / Removed` 小节；同一天已有条目时合并到当天，不重复创建日期。
 - 目标：让每轮变更都可追溯，避免 UI 调整、交互约定和兼容修复散落在线程上下文里。
 
+## 经验教训：关键业务数据不能只依赖 React effect 延迟落盘
+- 原因：设置基线后，`baselineStart` / `baselineEnd` 先进入 React 状态，再由 `useEffect(saveProjects)` 在渲染后写入 localStorage；如果用户很快刷新、关闭页面，或存在上一轮 effect 把旧项目状态写回，就可能出现界面短暂显示过基线但 `gantt_projects` 没有稳定保存的情况。
+- 影响：第二天重新启动项目时，任务计划和实际时间还在，但基线消失，用户会误以为 baseline 字段没有持久化或数据被清空。
+- 修复：任务更新统一通过 `setActiveProjectTasks` 同步计算 `nextProjects` 并立即调用 `saveProjects(nextProjects)`，基线捕获、清除、拖动、编辑、父任务汇总等任务级变更都在状态更新同一处落盘。
+- 规避：涉及用户明确提交的关键业务数据（基线、实际时间、依赖、任务编辑）时，持久化应绑定到提交动作或状态 reducer，不应只依赖渲染后的通用 effect；通用 effect 可做兜底，但不能是唯一落盘路径。
+- 校验：设置基线后应立即检查 `localStorage.gantt_projects` 中对应任务存在 `baselineStart` / `baselineEnd`，刷新页面后“显示基线”可用且基线条仍存在。
+
 ## 经验教训：第三方甘特表头会异步重绘
 - 原因：日视图双行表头最初只在一次 `requestAnimationFrame` 后处理第三方库生成的 SVG 文本，但 `gantt-task-react` 会在内部 state、日期范围或 DOM mutation 后重新生成表头，导致自定义的 `tspan` 拆行被覆盖。
 - 影响：用户切换或刷新后，日视图表头又回到单行 `周三, 11` 格式，日期文字拥挤，看起来像功能失效。

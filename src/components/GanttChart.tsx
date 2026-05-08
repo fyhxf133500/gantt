@@ -4,11 +4,19 @@ import { Gantt, Task as GanttTask, ViewMode } from "gantt-task-react";
 import "gantt-task-react/dist/index.css";
 import type { Task, TaskDependency } from "../types/task";
 import { GanttToolbar, type GanttDisplayMode } from "./GanttToolbar";
+import {
+  calculateProjectHealthStats,
+  isCountableMilestone,
+  isCountableTask,
+  isMilestoneAwaitingConfirmation,
+  type ProjectHealthStats,
+} from "../services/projectOverviewService";
 
 export type GanttChartProps = {
   projectId: string | null;
   tasks: TaskRow[];
   allTasks: TaskRow[];
+  focusedTask: FocusedTaskRequest | null;
   criticalPathError?: string | null;
   selectedSummaryTaskId: string | null;
   localCriticalPathError?: string | null;
@@ -24,6 +32,7 @@ export type GanttChartProps = {
   onToggleMilestonePassed: (id: string, options?: { force?: boolean }) => void;
   onSelectSummaryTask: (id: string) => void;
   onClearSelectedSummaryTask: () => void;
+  onClearFocusedTask: () => void;
 };
 
 type TaskUpdateInput = Pick<Task, "name" | "start" | "end" | "progress">;
@@ -31,6 +40,11 @@ type TaskUpdateInput = Pick<Task, "name" | "start" | "end" | "progress">;
 type TaskRow = Task & {
   level: number;
   hasChildren: boolean;
+};
+
+type FocusedTaskRequest = {
+  taskId: string;
+  requestId: number;
 };
 
 type MoveTaskOptions = {
@@ -79,6 +93,8 @@ type TaskListTableContentProps = TaskListTableBaseProps & {
   selectedSummaryTaskId: string | null;
   onSelectSummaryTask: (id: string) => void;
   onHoverTask: (taskId: string | null) => void;
+  focusedTask: FocusedTaskRequest | null;
+  onClearFocusedTask: () => void;
 };
 
 type TooltipContentProps = {
@@ -149,16 +165,6 @@ type ActualBarOverlay = {
   isOpen: boolean;
   tooltip: string;
   delayDays: number;
-};
-
-type ProjectHealthStats = {
-  totalTasks: number;
-  inProgress: number;
-  completed: number;
-  overdue: number;
-  readyMilestones: number;
-  passedMilestones: number;
-  globalCritical: number;
 };
 
 type DependencyIssue = {
@@ -594,54 +600,6 @@ function getDependencyIssues(
   });
 
   return issues;
-}
-
-function isMilestoneAwaitingConfirmation(task: Task) {
-  if ((task.type ?? "task") !== "milestone") return false;
-  if (task.milestoneStatus === "passed") return false;
-  return task.milestoneStatus === "ready" || utcDayStamp(new Date()) >= utcDayStamp(task.end);
-}
-
-function isCountableTask(task: TaskRow) {
-  return !task.hasChildren && (task.type ?? "task") === "task";
-}
-
-function isCountableMilestone(task: TaskRow) {
-  return !task.hasChildren && (task.type ?? "task") === "milestone";
-}
-
-function calculateProjectHealthStats(tasks: TaskRow[]): ProjectHealthStats {
-  return tasks.reduce<ProjectHealthStats>(
-    (stats, task) => {
-      if (isCountableTask(task)) {
-        stats.totalTasks += 1;
-        if (task.scheduleStatus === "inProgress") stats.inProgress += 1;
-        if (task.scheduleStatus === "completed") stats.completed += 1;
-        if (task.scheduleStatus === "overdue") stats.overdue += 1;
-      }
-
-      if (isCountableMilestone(task)) {
-        stats.totalTasks += 1;
-        if (isMilestoneAwaitingConfirmation(task)) stats.readyMilestones += 1;
-        if (task.milestoneStatus === "passed") stats.passedMilestones += 1;
-      }
-
-      if (!task.hasChildren && task.isCritical) {
-        stats.globalCritical += 1;
-      }
-
-      return stats;
-    },
-    {
-      totalTasks: 0,
-      inProgress: 0,
-      completed: 0,
-      overdue: 0,
-      readyMilestones: 0,
-      passedMilestones: 0,
-      globalCritical: 0,
-    }
-  );
 }
 
 function getDurationDays(start: Date, end: Date) {
@@ -1088,6 +1046,8 @@ function TaskListTableContent({
   selectedSummaryTaskId,
   onSelectSummaryTask,
   onHoverTask,
+  focusedTask,
+  onClearFocusedTask,
 }: TaskListTableContentProps) {
   const dateFormatter = useMemo(() => new Intl.DateTimeFormat(locale, DATE_FORMAT_OPTIONS), [locale]);
   const [draggingTaskId, setDraggingTaskId] = useState<string | null>(null);
@@ -1095,10 +1055,28 @@ function TaskListTableContent({
   const [dropPosition, setDropPosition] = useState<"before" | "after" | "inside" | null>(null);
   const [dependencyPopover, setDependencyPopover] = useState<DependencyPopoverState | null>(null);
   const [pendingMilestonePass, setPendingMilestonePass] = useState<PendingMilestonePass | null>(null);
+  const rowRefs = useRef(new Map<string, HTMLDivElement>());
   const displayTasks = useMemo(
     () => tasks.filter((task) => task.id !== RANGE_EXTENDER_TASK_ID),
     [tasks]
   );
+
+  useEffect(() => {
+    if (!focusedTask) return undefined;
+    if (!displayTasks.some((task) => task.id === focusedTask.taskId)) return undefined;
+
+    setSelectedTask(focusedTask.taskId);
+    const frameId = requestAnimationFrame(() => {
+      rowRefs.current.get(focusedTask.taskId)?.scrollIntoView({
+        block: "center",
+        inline: "nearest",
+      });
+    });
+
+    return () => {
+      cancelAnimationFrame(frameId);
+    };
+  }, [displayTasks, focusedTask, setSelectedTask]);
 
   useEffect(() => {
     if (!dependencyPopover) return undefined;
@@ -1163,6 +1141,7 @@ function TaskListTableContent({
         const expanderSymbol = hasChildren ? (isExpanded ? "▼" : "▶") : "";
 
         const isSelected = selectedTaskId === task.id;
+        const isFocusedFromOverview = focusedTask?.taskId === task.id;
         const isSelectedSummary = hasChildren && selectedSummaryTaskId === task.id;
         const isDropTarget = Boolean(draggingTaskId && dropTargetId === task.id);
         const isDropInside = isDropTarget && dropPosition === "inside";
@@ -1172,6 +1151,7 @@ function TaskListTableContent({
         const rowClassName = [
           "task-list-row",
           isSelected ? "task-list-row--active" : "",
+          isFocusedFromOverview ? "task-list-row--overview-focus" : "",
           isSelectedSummary ? "task-list-row--summary-selected" : "",
           isDropInside ? "task-list-row--drag-target" : "",
           isDropBefore ? "task-list-row--drop-before" : "",
@@ -1207,12 +1187,20 @@ function TaskListTableContent({
         return (
           <div
             key={`${task.id}-row`}
+            ref={(node) => {
+              if (node) {
+                rowRefs.current.set(task.id, node);
+              } else {
+                rowRefs.current.delete(task.id);
+              }
+            }}
             className={rowClassName}
             style={{ height: rowHeight }}
             onMouseEnter={() => onHoverTask(task.id)}
             onMouseLeave={() => onHoverTask(null)}
             onClick={(event) => {
               event.stopPropagation();
+              onClearFocusedTask();
               setSelectedTask(task.id);
               if (hasChildren && originalTask) {
                 onSelectSummaryTask(originalTask.id);
@@ -1986,6 +1974,7 @@ export function GanttChart({
   projectId,
   tasks,
   allTasks,
+  focusedTask,
   criticalPathError,
   selectedSummaryTaskId,
   localCriticalPathError,
@@ -2001,6 +1990,7 @@ export function GanttChart({
   onToggleMilestonePassed,
   onSelectSummaryTask,
   onClearSelectedSummaryTask,
+  onClearFocusedTask,
 }: GanttChartProps) {
   const [viewMode, setViewMode] = useState<ViewMode>(ViewMode.Day);
   const [displayMode, setDisplayMode] = useState<GanttDisplayMode>("simple");
@@ -2066,6 +2056,12 @@ export function GanttChart({
     onClearBaseline();
     setShowBaseline(false);
   };
+
+  useEffect(() => {
+    if (!focusedTask) return;
+    setTaskSearch("");
+    setTaskFilter("all");
+  }, [focusedTask]);
 
   useEffect(() => {
     if (!hasBaseline) {
@@ -2518,6 +2514,8 @@ export function GanttChart({
         selectedSummaryTaskId={selectedSummaryTaskId}
         onSelectSummaryTask={onSelectSummaryTask}
         onHoverTask={setHoveredTaskId}
+        focusedTask={focusedTask}
+        onClearFocusedTask={onClearFocusedTask}
       />
     );
     return Table;
@@ -2532,6 +2530,8 @@ export function GanttChart({
     selectedSummaryTaskId,
     onSelectSummaryTask,
     setHoveredTaskId,
+    focusedTask,
+    onClearFocusedTask,
   ]);
 
   const handleDateChange = (updatedTask: GanttTask) => {
@@ -2553,12 +2553,14 @@ export function GanttChart({
   };
 
   const handleTaskClick = (clickedTask: GanttTask) => {
+    onClearFocusedTask();
     const originalTask = taskById.get(clickedTask.id);
     if (!originalTask?.hasChildren) return;
     onSelectSummaryTask(originalTask.id);
   };
 
   const handleTaskDoubleClick = (clickedTask: GanttTask) => {
+    onClearFocusedTask();
     const originalTask = taskById.get(clickedTask.id);
     if (!originalTask) return;
     onEditTask(originalTask);
@@ -2626,6 +2628,7 @@ export function GanttChart({
     if (target.closest(".task-list-row")) return;
     if (target.closest("g[tabindex='0']")) return;
     if (target.closest("button, input, label, select, textarea")) return;
+    onClearFocusedTask();
     onClearSelectedSummaryTask();
   };
 

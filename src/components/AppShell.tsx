@@ -2,11 +2,15 @@ import { useEffect, useRef, useState } from "react";
 import type { KeyboardEvent, MouseEvent, ReactNode } from "react";
 import type { Project } from "../types/project";
 
+export type ProjectView = "overview" | "gantt";
+
 export type AppShellProps = {
   projectName: string;
   projects: Project[];
   activeProjectId: string | null;
+  activeProjectView: ProjectView;
   onSelectProject: (projectId: string) => void;
+  onSelectProjectView: (view: ProjectView) => void;
   onCreateProject: (name: string) => void;
   onDuplicateProject: (projectId: string) => void;
   onSaveProjectAsTemplate: (projectId: string) => void;
@@ -38,7 +42,9 @@ export function AppShell({
   projectName,
   projects,
   activeProjectId,
+  activeProjectView,
   onSelectProject,
+  onSelectProjectView,
   onCreateProject,
   onDuplicateProject,
   onSaveProjectAsTemplate,
@@ -62,6 +68,8 @@ export function AppShell({
   const templateProjects = filteredProjects.filter((project) => project.isTemplate);
   const hasProjectSearchResults = regularProjects.length > 0 || templateProjects.length > 0;
   const editingProjectId = editingProject?.projectId ?? null;
+  const activeProject = projects.find((project) => project.id === activeProjectId) ?? null;
+  const isActiveTemplate = activeProject?.isTemplate === true;
 
   useEffect(() => {
     editingProjectRef.current = editingProject;
@@ -87,6 +95,7 @@ export function AppShell({
     if (name === null) return;
     const normalizedName = name.trim();
     onCreateProject(normalizedName || fallbackName);
+    onSelectProjectView("overview");
   };
 
   const startRenameProject = (project: Project) => {
@@ -139,6 +148,9 @@ export function AppShell({
   const handleDuplicateProject = (project: Project) => {
     setProjectMenu(null);
     onDuplicateProject(project.id);
+    if (!project.isTemplate) {
+      onSelectProjectView("overview");
+    }
   };
 
   const handleSaveProjectAsTemplate = (project: Project) => {
@@ -149,6 +161,7 @@ export function AppShell({
   const handleCreateProjectFromTemplate = (project: Project) => {
     setProjectMenu(null);
     onCreateProjectFromTemplate(project.id);
+    onSelectProjectView("overview");
   };
 
   const handleMenuButtonClick = (event: MouseEvent<HTMLButtonElement>, projectId: string) => {
@@ -172,13 +185,14 @@ export function AppShell({
     startRenameProject(project);
   };
 
-  const handleProjectNameClick = (projectId: string) => {
+  const handleProjectNameClick = (project: Project) => {
     if (selectProjectTimerRef.current) {
       window.clearTimeout(selectProjectTimerRef.current);
     }
 
     selectProjectTimerRef.current = window.setTimeout(() => {
-      onSelectProject(projectId);
+      onSelectProject(project.id);
+      onSelectProjectView(project.isTemplate ? "gantt" : "overview");
       selectProjectTimerRef.current = null;
     }, 180);
   };
@@ -208,54 +222,56 @@ export function AppShell({
 
   const renderProjectItem = (project: Project) => {
     const isTemplate = project.isTemplate === true;
+    const isActiveProject = project.id === activeProjectId;
 
     return (
       <div
         key={project.id}
-        className={project.id === activeProjectId ? "project-list-item project-list-item--active" : "project-list-item"}
+        className={isActiveProject ? "project-list-item project-list-item--active" : "project-list-item"}
         onContextMenu={(event) => handleProjectContextMenu(event, project.id)}
       >
-        {editingProject?.projectId === project.id ? (
-          <div className="project-rename-row" onClick={(event) => event.stopPropagation()}>
-            <span className="project-list-dot" aria-hidden="true" />
-            <input
-              ref={editingInputRef}
-              className="project-rename-input"
-              value={editingProject.value}
-              onChange={(event) => updateEditingProjectValue(project.id, event.target.value)}
-              onClick={handleRenameInputClick}
-              onBlur={handleRenameInputBlur}
-              onKeyDown={handleRenameInputKeyDown}
-              aria-label="项目名称"
-            />
-          </div>
-        ) : (
+        <div className="project-list-main-row">
+          {editingProject?.projectId === project.id ? (
+            <div className="project-rename-row" onClick={(event) => event.stopPropagation()}>
+              <span className="project-list-dot" aria-hidden="true" />
+              <input
+                ref={editingInputRef}
+                className="project-rename-input"
+                value={editingProject.value}
+                onChange={(event) => updateEditingProjectValue(project.id, event.target.value)}
+                onClick={handleRenameInputClick}
+                onBlur={handleRenameInputBlur}
+                onKeyDown={handleRenameInputKeyDown}
+                aria-label="项目名称"
+              />
+            </div>
+          ) : (
+            <button
+              type="button"
+              className="project-select-button"
+              onClick={() => handleProjectNameClick(project)}
+              onDoubleClick={(event) => handleProjectNameDoubleClick(event, project)}
+            >
+              <span className={isTemplate ? "project-list-dot project-list-dot--template" : "project-list-dot"} aria-hidden="true" />
+              <span className="project-list-name">{project.name}</span>
+            </button>
+          )}
+
           <button
             type="button"
-            className="project-select-button"
-            onClick={() => handleProjectNameClick(project.id)}
-            onDoubleClick={(event) => handleProjectNameDoubleClick(event, project)}
+            className={
+              openMenuProjectId === project.id
+                ? "project-more-button project-more-button--open"
+                : "project-more-button"
+            }
+            aria-label={`打开${project.name}项目菜单`}
+            aria-haspopup="menu"
+            aria-expanded={openMenuProjectId === project.id}
+            onClick={(event) => handleMenuButtonClick(event, project.id)}
           >
-            <span className={isTemplate ? "project-list-dot project-list-dot--template" : "project-list-dot"} aria-hidden="true" />
-            <span className="project-list-name">{project.name}</span>
+            ...
           </button>
-        )}
-
-        <button
-          type="button"
-          className={
-            openMenuProjectId === project.id
-              ? "project-more-button project-more-button--open"
-              : "project-more-button"
-          }
-          aria-label={`打开${project.name}项目菜单`}
-          aria-haspopup="menu"
-          aria-expanded={openMenuProjectId === project.id}
-          onClick={(event) => handleMenuButtonClick(event, project.id)}
-        >
-          ...
-        </button>
-
+        </div>
         {projectMenu?.projectId === project.id && (
           <div
             className="project-menu"
@@ -362,6 +378,32 @@ export function AppShell({
             <div>
               <div className="project-header-label">项目</div>
               <h1 className="project-title">{projectName}</h1>
+              <div className="project-view-tabs" aria-label={`${projectName}页面切换`}>
+                {!isActiveTemplate && (
+                  <button
+                    type="button"
+                    className={
+                      activeProjectView === "overview"
+                        ? "project-view-tab project-view-tab--active"
+                        : "project-view-tab"
+                    }
+                    onClick={() => onSelectProjectView("overview")}
+                  >
+                    概览
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className={
+                    activeProjectView === "gantt" || isActiveTemplate
+                      ? "project-view-tab project-view-tab--active"
+                      : "project-view-tab"
+                  }
+                  onClick={() => onSelectProjectView("gantt")}
+                >
+                  甘特图
+                </button>
+              </div>
             </div>
           </header>
 

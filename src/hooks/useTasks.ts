@@ -779,10 +779,6 @@ export function useTasks() {
   );
   const tasks = activeProject?.tasks ?? EMPTY_TASKS;
 
-  useEffect(() => {
-    saveProjects(projects);
-  }, [projects]);
-
   const setActiveProjectTasks = useCallback((updater: Task[] | ((prev: Task[]) => Task[])) => {
     setProjectState((prev) => {
       const activeProject = prev.projects.find((project) => project.id === prev.activeProjectId) ?? prev.projects[0];
@@ -798,6 +794,7 @@ export function useTasks() {
           : project
       );
 
+      saveProjects(nextProjects);
       return { ...prev, projects: nextProjects };
     });
   }, []);
@@ -949,6 +946,30 @@ export function useTasks() {
         return { ...task, isExpanded: !current };
       })
     );
+  }, [setActiveProjectTasks]);
+
+  const revealTask = useCallback((id: string) => {
+    setActiveProjectTasks((prev) => {
+      const taskById = new Map(prev.map((task) => [task.id, task]));
+      let currentParentId = taskById.get(id)?.parentId ?? null;
+      const ancestorIds = new Set<string>();
+
+      while (currentParentId && !ancestorIds.has(currentParentId)) {
+        ancestorIds.add(currentParentId);
+        currentParentId = taskById.get(currentParentId)?.parentId ?? null;
+      }
+
+      if (ancestorIds.size === 0) return prev;
+
+      let changed = false;
+      const next = prev.map((task) => {
+        if (!ancestorIds.has(task.id) || task.isExpanded !== false) return task;
+        changed = true;
+        return { ...task, isExpanded: true };
+      });
+
+      return changed ? next : prev;
+    });
   }, [setActiveProjectTasks]);
 
   const replaceTasks = useCallback((nextTasks: Task[]) => {
@@ -1110,6 +1131,7 @@ export function useTasks() {
     renameProject,
     deleteProject,
     toggleTaskExpanded,
+    revealTask,
     replaceTasks,
     captureBaseline,
     clearBaseline,

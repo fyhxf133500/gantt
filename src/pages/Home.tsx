@@ -1,6 +1,8 @@
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { AppShell } from "../components/AppShell";
+import type { ProjectView } from "../components/AppShell";
 import { GanttChart } from "../components/GanttChart";
+import { ProjectOverview } from "../components/ProjectOverview";
 import { TaskFormModal } from "../components/TaskFormModal";
 import type { TaskFormData } from "../components/TaskFormModal";
 import { DeleteTaskDialog } from "../components/DeleteTaskDialog";
@@ -14,11 +16,17 @@ import {
   type DependencyConflict,
   useTasks,
 } from "../hooks/useTasks";
+import { buildProjectOverview } from "../services/projectOverviewService";
 import type { Task } from "../types/task";
 
 type PendingConflictState = {
   nextTasks: Task[];
   conflicts: DependencyConflict[];
+};
+
+type FocusedTaskState = {
+  taskId: string;
+  requestId: number;
 };
 
 export function Home() {
@@ -42,6 +50,7 @@ export function Home() {
     deleteProject: deleteProjectRecord,
     moveTask,
     deleteTask,
+    revealTask,
     toggleTaskExpanded,
     toggleMilestonePassed,
     replaceTasks,
@@ -54,6 +63,16 @@ export function Home() {
   const [editingTask, setEditingTask] = useState<Task | null>(null);
   const [deleteDialogTask, setDeleteDialogTask] = useState<Task | null>(null);
   const [pendingConflict, setPendingConflict] = useState<PendingConflictState | null>(null);
+  const [currentProjectView, setCurrentProjectView] = useState<ProjectView>("overview");
+  const [focusedTask, setFocusedTask] = useState<FocusedTaskState | null>(null);
+  const projectOverview = useMemo(() => buildProjectOverview(taskRows), [taskRows]);
+  const isActiveTemplate = activeProject?.isTemplate === true;
+
+  useEffect(() => {
+    if (isActiveTemplate && currentProjectView !== "gantt") {
+      setCurrentProjectView("gantt");
+    }
+  }, [currentProjectView, isActiveTemplate]);
 
   const evaluateCandidateTasks = (nextTasks: Task[]) => {
     const summarizedTasks = calculateParentSummary(nextTasks);
@@ -154,12 +173,29 @@ export function Home() {
     setPendingConflict(null);
   };
 
+  const handleOverviewTaskSelect = (taskId: string) => {
+    revealTask(taskId);
+    const targetTask = taskRows.find((task) => task.id === taskId);
+    if (targetTask?.hasChildren) {
+      selectSummaryTask(taskId);
+    } else {
+      clearSelectedSummaryTask();
+    }
+    setFocusedTask((current) => ({
+      taskId,
+      requestId: (current?.requestId ?? 0) + 1,
+    }));
+    setCurrentProjectView("gantt");
+  };
+
   return (
     <AppShell
       projectName={activeProject?.name ?? "默认项目"}
       projects={projects}
       activeProjectId={activeProjectId}
+      activeProjectView={currentProjectView}
       onSelectProject={selectProject}
+      onSelectProjectView={setCurrentProjectView}
       onCreateProject={createProject}
       onDuplicateProject={duplicateProject}
       onSaveProjectAsTemplate={saveProjectAsTemplate}
@@ -175,26 +211,35 @@ export function Home() {
           }
         }}
       >
-        <GanttChart
-          projectId={activeProjectId}
-          tasks={visibleTasks}
-          allTasks={taskRows}
-          criticalPathError={criticalPathError}
-          selectedSummaryTaskId={selectedSummaryTaskId}
-          localCriticalPathError={localCriticalPathError}
-          hasBaseline={hasBaseline}
-          onCreateTask={handleCreateTask}
-          onEditTask={handleEditTask}
-          onDeleteTask={handleDeleteTask}
-          onUpdateTask={handleUpdateTask}
-          onCaptureBaseline={captureBaseline}
-          onClearBaseline={clearBaseline}
-          onToggleExpand={toggleTaskExpanded}
-          onMoveTask={moveTask}
-          onToggleMilestonePassed={toggleMilestonePassed}
-          onSelectSummaryTask={selectSummaryTask}
-          onClearSelectedSummaryTask={clearSelectedSummaryTask}
-        />
+        {currentProjectView === "overview" && !isActiveTemplate ? (
+          <ProjectOverview
+            overview={projectOverview}
+            onSelectTask={handleOverviewTaskSelect}
+          />
+        ) : (
+          <GanttChart
+            projectId={activeProjectId}
+            tasks={visibleTasks}
+            allTasks={taskRows}
+            focusedTask={focusedTask}
+            criticalPathError={criticalPathError}
+            selectedSummaryTaskId={selectedSummaryTaskId}
+            localCriticalPathError={localCriticalPathError}
+            hasBaseline={hasBaseline}
+            onCreateTask={handleCreateTask}
+            onEditTask={handleEditTask}
+            onDeleteTask={handleDeleteTask}
+            onUpdateTask={handleUpdateTask}
+            onCaptureBaseline={captureBaseline}
+            onClearBaseline={clearBaseline}
+            onToggleExpand={toggleTaskExpanded}
+            onMoveTask={moveTask}
+            onToggleMilestonePassed={toggleMilestonePassed}
+            onSelectSummaryTask={selectSummaryTask}
+            onClearSelectedSummaryTask={clearSelectedSummaryTask}
+            onClearFocusedTask={() => setFocusedTask(null)}
+          />
+        )}
       </div>
       <TaskFormModal
         isOpen={isModalOpen}
