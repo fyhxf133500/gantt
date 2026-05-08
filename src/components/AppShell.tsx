@@ -58,7 +58,7 @@ export function AppShell({
   const [projectSearchQuery, setProjectSearchQuery] = useState("");
   const editingInputRef = useRef<HTMLInputElement | null>(null);
   const editingProjectRef = useRef<EditingProjectState | null>(null);
-  const selectProjectTimerRef = useRef<ReturnType<typeof window.setTimeout> | null>(null);
+  const selectProjectTimerRef = useRef<number | null>(null);
   const canDeleteProject = projects.length > 1;
   const openMenuProjectId = projectMenu?.projectId ?? null;
   const filteredProjects = projects.filter((project) =>

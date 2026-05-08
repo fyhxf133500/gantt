@@ -27,6 +27,7 @@ export type GanttChartProps = {
   onUpdateTask: (id: string, input: TaskUpdateInput) => boolean;
   onCaptureBaseline: () => void;
   onClearBaseline: () => void;
+  onExportExcel: () => void;
   onToggleExpand: (id: string) => void;
   onMoveTask: (id: string, parentId: string | null, options?: MoveTaskOptions) => void;
   onToggleMilestonePassed: (id: string, options?: { force?: boolean }) => void;
@@ -1985,6 +1986,7 @@ export function GanttChart({
   onUpdateTask,
   onCaptureBaseline,
   onClearBaseline,
+  onExportExcel,
   onToggleExpand,
   onMoveTask,
   onToggleMilestonePassed,
@@ -2735,6 +2737,9 @@ export function GanttChart({
             </label>
             <button type="button" className="primary-button" onClick={onCreateTask}>
               + 新建任务
+            </button>
+            <button type="button" className="secondary-button" onClick={onExportExcel}>
+              导出 Excel
             </button>
           </div>
         </div>
