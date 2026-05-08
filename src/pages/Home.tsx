@@ -74,6 +74,23 @@ export function Home() {
     }
   }, [currentProjectView, isActiveTemplate]);
 
+  useEffect(() => {
+    setFocusedTask(null);
+  }, [activeProjectId]);
+
+  useEffect(() => {
+    if (currentProjectView === "overview") {
+      setFocusedTask(null);
+    }
+  }, [currentProjectView]);
+
+  useEffect(() => {
+    if (!focusedTask) return;
+    if (!taskRows.some((task) => task.id === focusedTask.taskId)) {
+      setFocusedTask(null);
+    }
+  }, [focusedTask, taskRows]);
+
   const evaluateCandidateTasks = (nextTasks: Task[]) => {
     const summarizedTasks = calculateParentSummary(nextTasks);
     const conflicts = checkDependencyConflicts(summarizedTasks);
@@ -174,8 +191,14 @@ export function Home() {
   };
 
   const handleOverviewTaskSelect = (taskId: string) => {
-    revealTask(taskId);
     const targetTask = taskRows.find((task) => task.id === taskId);
+    if (!targetTask) {
+      setFocusedTask(null);
+      setCurrentProjectView("gantt");
+      return;
+    }
+
+    revealTask(taskId);
     if (targetTask?.hasChildren) {
       selectSummaryTask(taskId);
     } else {
@@ -208,6 +231,7 @@ export function Home() {
         onClick={(event) => {
           if (event.target === event.currentTarget) {
             clearSelectedSummaryTask();
+            setFocusedTask(null);
           }
         }}
       >
