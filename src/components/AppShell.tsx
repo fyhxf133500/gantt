@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { KeyboardEvent, MouseEvent, ReactNode } from "react";
 import type { Project } from "../types/project";
 
-export type ProjectView = "overview" | "gantt";
+export type ProjectView = "overview" | "gantt" | "calendar";
 
 export type AppShellProps = {
   projectName: string;
@@ -403,11 +403,24 @@ export function AppShell({
                 >
                   甘特图
                 </button>
+                {!isActiveTemplate && (
+                  <button
+                    type="button"
+                    className={
+                      activeProjectView === "calendar"
+                        ? "project-view-tab project-view-tab--active"
+                        : "project-view-tab"
+                    }
+                    onClick={() => onSelectProjectView("calendar")}
+                  >
+                    日历
+                  </button>
+                )}
               </div>
             </div>
           </header>
 
-          <section className="project-workspace" aria-label={`${projectName}甘特图工作区`}>
+          <section className="project-workspace" aria-label={`${projectName}项目工作区`}>
             {children}
           </section>
         </main>
