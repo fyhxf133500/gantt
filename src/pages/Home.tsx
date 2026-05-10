@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { AppShell } from "../components/AppShell";
 import type { ProjectView } from "../components/AppShell";
 import { GanttChart } from "../components/GanttChart";
+import { ProjectCalendar } from "../components/ProjectCalendar";
 import { ProjectOverview } from "../components/ProjectOverview";
 import { TaskFormModal } from "../components/TaskFormModal";
 import type { TaskFormData } from "../components/TaskFormModal";
@@ -80,7 +81,7 @@ export function Home() {
   }, [activeProjectId]);
 
   useEffect(() => {
-    if (currentProjectView === "overview") {
+    if (currentProjectView !== "gantt") {
       setFocusedTask(null);
     }
   }, [currentProjectView]);
@@ -249,6 +250,11 @@ export function Home() {
         {currentProjectView === "overview" && !isActiveTemplate ? (
           <ProjectOverview
             overview={projectOverview}
+            onSelectTask={handleOverviewTaskSelect}
+          />
+        ) : currentProjectView === "calendar" && !isActiveTemplate ? (
+          <ProjectCalendar
+            tasks={taskRows}
             onSelectTask={handleOverviewTaskSelect}
           />
         ) : (
