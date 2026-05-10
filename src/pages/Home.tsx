@@ -16,6 +16,7 @@ import {
   type DependencyConflict,
   useTasks,
 } from "../hooks/useTasks";
+import { exportProjectGanttExcel } from "../services/exportService";
 import { buildProjectOverview } from "../services/projectOverviewService";
 import type { Task } from "../types/task";
 
@@ -211,6 +212,16 @@ export function Home() {
     setCurrentProjectView("gantt");
   };
 
+  const handleExportExcel = () => {
+    void exportProjectGanttExcel({
+      projectName: activeProject?.name ?? "默认项目",
+      tasks: taskRows,
+    }).catch((error) => {
+      console.error(error);
+      window.alert("导出 Excel 失败，请稍后重试。");
+    });
+  };
+
   return (
     <AppShell
       projectName={activeProject?.name ?? "默认项目"}
@@ -256,6 +267,7 @@ export function Home() {
             onUpdateTask={handleUpdateTask}
             onCaptureBaseline={captureBaseline}
             onClearBaseline={clearBaseline}
+            onExportExcel={handleExportExcel}
             onToggleExpand={toggleTaskExpanded}
             onMoveTask={moveTask}
             onToggleMilestonePassed={toggleMilestonePassed}

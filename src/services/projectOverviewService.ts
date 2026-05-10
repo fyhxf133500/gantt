@@ -37,8 +37,41 @@ export type ProjectRiskItem = {
   isSummary: boolean;
 };
 
+export type ProjectOverviewCoreStats = {
+  totalTasks: number;
+  completed: number;
+  inProgress: number;
+  overdue: number;
+  dependencyIssues: number;
+  globalCritical: number;
+};
+
+export type TaskStatusDistribution = {
+  notStarted: number;
+  inProgress: number;
+  completed: number;
+  overdue: number;
+};
+
+export type PlanExecutionDistribution = {
+  onPlan: number;
+  earlyCompleted: number;
+  overdue: number;
+  actualLate: number;
+};
+
+export type TaskStatusCategory = keyof TaskStatusDistribution;
+export type PlanExecutionCategory = keyof PlanExecutionDistribution;
+
 export type ProjectOverview = {
   stats: ProjectHealthStats;
+  coreStats: ProjectOverviewCoreStats;
+  statusDistribution: TaskStatusDistribution;
+  executionDistribution: PlanExecutionDistribution;
+  chartItems: {
+    status: Record<TaskStatusCategory, ProjectRiskItem[]>;
+    execution: Record<PlanExecutionCategory, ProjectRiskItem[]>;
+  };
   risks: Record<ProjectRiskCategory, ProjectRiskItem[]>;
 };
 
@@ -89,6 +122,10 @@ export function isCountableMilestone(task: OverviewTask) {
 
 function isCountableWorkItem(task: OverviewTask) {
   return isCountableTask(task) || isCountableMilestone(task);
+}
+
+function isOverviewTaskItem(task: OverviewTask) {
+  return (task.type ?? "task") === "task";
 }
 
 function hasDependencyIssue(task: OverviewTask) {
@@ -148,7 +185,7 @@ function getBaselineDelayReason(task: OverviewTask) {
   return messages.length > 0 ? messages.join("；") : "当前计划晚于基线";
 }
 
-function makeRiskItem(task: OverviewTask, category: ProjectRiskCategory, reason: string): ProjectRiskItem {
+function makeRiskItem(task: OverviewTask, category: string, reason: string): ProjectRiskItem {
   return {
     key: `${category}-${task.id}`,
     taskId: task.id,
@@ -208,6 +245,103 @@ export function calculateProjectHealthStats(tasks: OverviewTask[], date = new Da
   );
 }
 
+function buildTaskStatusChartItems(tasks: OverviewTask[]): Record<TaskStatusCategory, ProjectRiskItem[]> {
+  const items: Record<TaskStatusCategory, ProjectRiskItem[]> = {
+    notStarted: [],
+    inProgress: [],
+    completed: [],
+    overdue: [],
+  };
+
+  tasks.forEach((task) => {
+    if (!isOverviewTaskItem(task)) return;
+
+    const status = task.scheduleStatus ?? "notStarted";
+    if (status === "completed") {
+      items.completed.push(makeRiskItem(task, "status-completed", "任务已完成"));
+    } else if (status === "inProgress") {
+      items.inProgress.push(makeRiskItem(task, "status-inProgress", "任务正在进行"));
+    } else if (status === "overdue") {
+      items.overdue.push(makeRiskItem(task, "status-overdue", "已超过计划结束，任务未完成"));
+    } else {
+      items.notStarted.push(makeRiskItem(task, "status-notStarted", "任务尚未开始"));
+    }
+  });
+
+  return {
+    notStarted: sortRiskItems(items.notStarted),
+    inProgress: sortRiskItems(items.inProgress),
+    completed: sortRiskItems(items.completed),
+    overdue: sortRiskItems(items.overdue),
+  };
+}
+
+function buildTaskStatusDistributionFromItems(
+  items: Record<TaskStatusCategory, ProjectRiskItem[]>
+): TaskStatusDistribution {
+  return {
+    notStarted: items.notStarted.length,
+    inProgress: items.inProgress.length,
+    completed: items.completed.length,
+    overdue: items.overdue.length,
+  };
+}
+
+function buildPlanExecutionChartItems(
+  tasks: OverviewTask[],
+  date = new Date()
+): Record<PlanExecutionCategory, ProjectRiskItem[]> {
+  const items: Record<PlanExecutionCategory, ProjectRiskItem[]> = {
+    onPlan: [],
+    earlyCompleted: [],
+    overdue: [],
+    actualLate: [],
+  };
+
+  tasks.forEach((task) => {
+    if (!isOverviewTaskItem(task)) return;
+
+    const actualEnd = getTaskActualEnd(task);
+    if (actualEnd) {
+      if (utcDayStamp(actualEnd) < utcDayStamp(task.end)) {
+        items.earlyCompleted.push(makeRiskItem(task, "execution-earlyCompleted", "实际完成早于计划结束"));
+      } else if (utcDayStamp(actualEnd) > utcDayStamp(task.end)) {
+        items.actualLate.push(makeRiskItem(task, "execution-actualLate", "实际完成晚于计划结束"));
+      } else {
+        items.onPlan.push(makeRiskItem(task, "execution-onPlan", "已按计划完成"));
+      }
+      return;
+    }
+
+    if (task.progress < 100 && utcDayStamp(date) > utcDayStamp(task.end)) {
+      items.overdue.push(makeRiskItem(task, "execution-overdue", "已超过计划结束，任务未完成"));
+    } else {
+      items.onPlan.push(makeRiskItem(task, "execution-onPlan", "当前未延期或已按计划完成"));
+    }
+  });
+
+  return {
+    onPlan: sortRiskItems(items.onPlan),
+    earlyCompleted: sortRiskItems(items.earlyCompleted),
+    overdue: sortRiskItems(items.overdue),
+    actualLate: sortRiskItems(items.actualLate),
+  };
+}
+
+function buildProjectOverviewCoreStats(tasks: OverviewTask[], statusDistribution: TaskStatusDistribution): ProjectOverviewCoreStats {
+  return {
+    totalTasks: statusDistribution.notStarted +
+      statusDistribution.inProgress +
+      statusDistribution.completed +
+      statusDistribution.overdue,
+    completed: statusDistribution.completed,
+    inProgress: statusDistribution.inProgress,
+    overdue: statusDistribution.overdue,
+    dependencyIssues: tasks.filter((task) => isOverviewTaskItem(task) && hasDependencyIssue(task)).length,
+    globalCritical: tasks.filter((task) => isOverviewTaskItem(task) && task.isCritical).length,
+  };
+}
+
 export function buildProjectOverview(tasks: OverviewTask[], date = new Date()): ProjectOverview {
   const risks: ProjectOverview["risks"] = {
     overdue: [],
@@ -247,8 +381,24 @@ export function buildProjectOverview(tasks: OverviewTask[], date = new Date()): 
     }
   });
 
+  const statusChartItems = buildTaskStatusChartItems(tasks);
+  const executionChartItems = buildPlanExecutionChartItems(tasks, date);
+  const statusDistribution = buildTaskStatusDistributionFromItems(statusChartItems);
+
   return {
     stats: calculateProjectHealthStats(tasks, date),
+    coreStats: buildProjectOverviewCoreStats(tasks, statusDistribution),
+    statusDistribution,
+    executionDistribution: {
+      onPlan: executionChartItems.onPlan.length,
+      earlyCompleted: executionChartItems.earlyCompleted.length,
+      overdue: executionChartItems.overdue.length,
+      actualLate: executionChartItems.actualLate.length,
+    },
+    chartItems: {
+      status: statusChartItems,
+      execution: executionChartItems,
+    },
     risks: {
       overdue: sortRiskItems(risks.overdue),
       baselineDelayed: sortRiskItems(risks.baselineDelayed),
